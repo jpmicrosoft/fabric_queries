@@ -1,0 +1,50 @@
+{
+  "name": "ExternalAccessReport",
+  "tables": [
+    {
+      "name": "ActorSummary",
+      "columns": [
+        {
+          "name": "Actor",
+          "dataType": "string"
+        },
+        {
+          "name": "ExternalAccessCount",
+          "dataType": "int"
+        }
+      ],
+      "source": "/lakehouse/audit/summary_actor"
+    },
+    {
+      "name": "OperationSummary",
+      "columns": [
+        {
+          "name": "Operation",
+          "dataType": "string"
+        },
+        {
+          "name": "AccessCount",
+          "dataType": "int"
+        }
+      ],
+      "source": "/lakehouse/audit/summary_operation"
+    }
+  ],
+  "visualizations": [
+    {
+      "type": "barChart",
+      "title": "External Access by Actor",
+      "data": "ActorSummary",
+      "xField": "Actor",
+      "yField": "ExternalAccessCount"
+    },
+    {
+      "type": "columnChart",
+      "title": "External Access by Operation",
+      "data": "OperationSummary",
+      "xField": "Operation",
+      "yField": "AccessCount"
+    }
+  ],
+  "notes": "This schema describes the intended tables and visuals. In Power BI Desktop or Fabric, connect to the Lakehouse and build visuals accordingly."
+}
