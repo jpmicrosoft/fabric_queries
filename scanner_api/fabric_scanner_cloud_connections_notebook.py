@@ -104,7 +104,11 @@ def post_workspace_info(workspace_ids: List[str]) -> str:
     if not workspace_ids:
         raise ValueError("workspace_ids cannot be empty.")
     url = f"{PBI_ADMIN_BASE}/workspaces/getInfo"
-    body = {"workspaces": workspace_ids}
+    body = {
+        "workspaces": workspace_ids,
+        "lineage": True,
+        "users": True
+    }
     r = requests.post(url, headers=HEADERS, json=body)
     r.raise_for_status()
     scan_id = (r.json() or {}).get("scanId")
@@ -148,10 +152,22 @@ def run_one_batch(batch_meta: List[Dict[str, Any]]) -> Dict[str, Any]:
     scan_id = post_workspace_info(ids)
     poll_scan_status(scan_id)
     payload = read_scan_result(scan_id)
+    
+    # Extract workspace users/owners from scan result
+    ws_users_map = {}
+    for ws in (payload.get("workspaces") or []):
+        ws_id = ws.get("id")
+        users = ws.get("users") or []
+        # Get workspace admins/owners
+        admins = [u.get("emailAddress") or u.get("identifier") 
+                  for u in users if u.get("workspaceUserAccessRight") in {"Admin", "Member"}]
+        ws_users_map[ws_id] = ", ".join(admins[:5]) if admins else None  # Limit to first 5
+    
     sidecar = {
         w.get("id"): {
             "name": w.get("name", ""),
-            "kind": (str(w.get("type")).lower() if w.get("type") else "unknown")
+            "kind": (str(w.get("type")).lower() if w.get("type") else "unknown"),
+            "users": ws_users_map.get(w.get("id"))
         } for w in batch_meta if w.get("id")
     }
     payload["workspace_sidecar"] = sidecar
@@ -169,14 +185,27 @@ def _lower_or(x, default="unknown"):
     return (str(x).lower() if x is not None else default)
 
 
+def _build_target(server, database, endpoint):
+    """Build a consolidated target string from server, database, and endpoint."""
+    parts = []
+    if server:
+        parts.append(f"Server: {server}")
+    if database:
+        parts.append(f"Database: {database}")
+    if endpoint:
+        parts.append(f"Endpoint: {endpoint}")
+    return " | ".join(parts) if parts else None
+
+
 def flatten_scan_payload(payload: Dict[str, Any], ws_sidecar: Dict[str, Dict[str, str]]) -> List[Row]:
     rows: List[Row] = []
     for ws in (payload.get("workspaces") or []):
         ws_id   = ws.get("id")
         itemset = ws.get("items") or []
-        wmeta   = ws_sidecar.get(ws_id, {"name": ws.get("name") or "", "kind": _lower_or(ws.get("type"))})
+        wmeta   = ws_sidecar.get(ws_id, {"name": ws.get("name") or "", "kind": _lower_or(ws.get("type")), "users": None})
         ws_name = wmeta.get("name", "")
         ws_kind = wmeta.get("kind", "unknown")
+        ws_users = wmeta.get("users")
 
         for item in itemset:
             item_id   = item.get("id")
@@ -184,6 +213,11 @@ def flatten_scan_payload(payload: Dict[str, Any], ws_sidecar: Dict[str, Dict[str
             item_type = _lower_or(item.get("type"))
 
             if item_type in {"semanticmodel", "dataset"}:
+                # Extract item-level metadata
+                item_creator = item.get("createdBy") or item.get("configuredBy")
+                item_modified_by = item.get("modifiedBy")
+                item_modified_date = item.get("modifiedDateTime")
+                
                 for ds in (item.get("datasources") or []):
                     conn      = ds.get("connectionDetails") or {}
                     connector = _lower_or(conn.get("datasourceType"))
@@ -192,14 +226,20 @@ def flatten_scan_payload(payload: Dict[str, Any], ws_sidecar: Dict[str, Dict[str
                     gateway_id= ds.get("gatewayId")
                     connection_scope = "OnPremViaGateway" if gateway_id else "Cloud"
                     cloud_flag       = (connection_scope == "Cloud") or (connector in CLOUD_CONNECTORS)
+                    target    = _build_target(server, database, None)
                     rows.append(Row(
                         workspace_id   = ws_id,
                         workspace_name = ws_name,
                         workspace_kind = ws_kind,
+                        workspace_users = ws_users,
                         item_id        = item_id,
                         item_name      = item_name,
                         item_type      = "SemanticModel",
+                        item_creator   = item_creator,
+                        item_modified_by = item_modified_by,
+                        item_modified_date = item_modified_date,
                         connector      = connector,
+                        target         = target,
                         server         = server,
                         database       = database,
                         endpoint       = None,
@@ -210,20 +250,30 @@ def flatten_scan_payload(payload: Dict[str, Any], ws_sidecar: Dict[str, Dict[str
 
             elif item_type == "dataflow":
                 generation = item.get("generation") or (item.get("properties") or {}).get("generation")
+                item_creator = item.get("createdBy") or item.get("configuredBy")
+                item_modified_by = item.get("modifiedBy")
+                item_modified_date = item.get("modifiedDateTime")
+                
                 sources    = item.get("sources") or item.get("entities") or []
                 for src in sources:
                     connector = _lower_or(src.get("type") or src.get("provider"))
                     endpoint  = src.get("url") or src.get("path")
                     connection_scope = "Cloud"
                     cloud_flag       = (connection_scope == "Cloud") or (connector in CLOUD_CONNECTORS)
+                    target    = _build_target(None, None, endpoint)
                     rows.append(Row(
                         workspace_id   = ws_id,
                         workspace_name = ws_name,
                         workspace_kind = ws_kind,
+                        workspace_users = ws_users,
                         item_id        = item_id,
                         item_name      = item_name,
                         item_type      = "Dataflow",
+                        item_creator   = item_creator,
+                        item_modified_by = item_modified_by,
+                        item_modified_date = item_modified_date,
                         connector      = connector,
+                        target         = target,
                         server         = None,
                         database       = None,
                         endpoint       = endpoint,
@@ -233,6 +283,10 @@ def flatten_scan_payload(payload: Dict[str, Any], ws_sidecar: Dict[str, Dict[str
                     ))
 
             elif item_type == "pipeline":
+                item_creator = item.get("createdBy") or item.get("configuredBy")
+                item_modified_by = item.get("modifiedBy")
+                item_modified_date = item.get("modifiedDateTime")
+                
                 for act in (item.get("activities") or []):
                     ref       = act.get("linkedService") or {}
                     connector = _lower_or(ref.get("type") or act.get("type"))
@@ -240,14 +294,20 @@ def flatten_scan_payload(payload: Dict[str, Any], ws_sidecar: Dict[str, Dict[str
                     gateway_id= ref.get("gatewayId")
                     connection_scope = "OnPremViaGateway" if gateway_id else "Cloud"
                     cloud_flag       = (connection_scope == "Cloud") or (connector in CLOUD_CONNECTORS)
+                    target    = _build_target(None, None, endpoint)
                     rows.append(Row(
                         workspace_id   = ws_id,
                         workspace_name = ws_name,
                         workspace_kind = ws_kind,
+                        workspace_users = ws_users,
                         item_id        = item_id,
                         item_name      = item_name,
                         item_type      = "Pipeline",
+                        item_creator   = item_creator,
+                        item_modified_by = item_modified_by,
+                        item_modified_date = item_modified_date,
                         connector      = connector,
+                        target         = target,
                         server         = None,
                         database       = None,
                         endpoint       = endpoint,
@@ -257,6 +317,10 @@ def flatten_scan_payload(payload: Dict[str, Any], ws_sidecar: Dict[str, Dict[str
                     ))
 
             elif item_type in {"lakehouse", "notebook"}:
+                item_creator = item.get("createdBy") or item.get("configuredBy")
+                item_modified_by = item.get("modifiedBy")
+                item_modified_date = item.get("modifiedDateTime")
+                
                 references = (item.get("connections") or []) + (item.get("lineage") or [])
                 for ref in references:
                     connector       = _lower_or(ref.get("type"))
@@ -264,14 +328,20 @@ def flatten_scan_payload(payload: Dict[str, Any], ws_sidecar: Dict[str, Dict[str
                     is_cloud_flag   = ref.get("isCloud", True)
                     connection_scope= "Cloud" if is_cloud_flag else "OnPremViaGateway"
                     cloud_flag      = (connection_scope == "Cloud") or (connector in CLOUD_CONNECTORS)
+                    target          = _build_target(None, None, endpoint)
                     rows.append(Row(
                         workspace_id   = ws_id,
                         workspace_name = ws_name,
                         workspace_kind = ws_kind,
+                        workspace_users = ws_users,
                         item_id        = item_id,
                         item_name      = item_name,
                         item_type      = item_type.capitalize(),
+                        item_creator   = item_creator,
+                        item_modified_by = item_modified_by,
+                        item_modified_date = item_modified_date,
                         connector      = connector,
+                        target         = target,
                         server         = None,
                         database       = None,
                         endpoint       = endpoint,
@@ -281,14 +351,23 @@ def flatten_scan_payload(payload: Dict[str, Any], ws_sidecar: Dict[str, Dict[str
                     ))
 
             else:
+                item_creator = item.get("createdBy") or item.get("configuredBy")
+                item_modified_by = item.get("modifiedBy")
+                item_modified_date = item.get("modifiedDateTime")
+                
                 rows.append(Row(
                     workspace_id   = ws_id,
                     workspace_name = ws_name,
                     workspace_kind = ws_kind,
+                    workspace_users = ws_users,
                     item_id        = item_id,
                     item_name      = item_name,
                     item_type      = item_type.capitalize(),
+                    item_creator   = item_creator,
+                    item_modified_by = item_modified_by,
+                    item_modified_date = item_modified_date,
                     connector      = "unknown",
+                    target         = None,
                     server         = None,
                     database       = None,
                     endpoint       = None,
@@ -355,10 +434,22 @@ def run_one_batch_incremental(batch_meta: List[Dict[str, Any]]) -> Dict[str, Any
     scan_id = post_workspace_info(ids)
     poll_scan_status(scan_id)
     payload = read_scan_result(scan_id)
+    
+    # Extract workspace users/owners from scan result
+    ws_users_map = {}
+    for ws in (payload.get("workspaces") or []):
+        ws_id = ws.get("id")
+        users = ws.get("users") or []
+        # Get workspace admins/owners
+        admins = [u.get("emailAddress") or u.get("identifier") 
+                  for u in users if u.get("workspaceUserAccessRight") in {"Admin", "Member"}]
+        ws_users_map[ws_id] = ", ".join(admins[:5]) if admins else None  # Limit to first 5
+    
     sidecar = {
         w.get("id"): {
             "name": w.get("name", ""),
-            "kind": (str(w.get("type")).lower() if w.get("type") else "unknown")
+            "kind": (str(w.get("type")).lower() if w.get("type") else "unknown"),
+            "users": ws_users_map.get(w.get("id"))
         } for w in batch_meta if w.get("id")
     }
     payload["workspace_sidecar"] = sidecar
@@ -423,11 +514,244 @@ def incremental_update(modified_since_iso: str,
 
     print(f"Incremental update completed. Curated path: {curated_dir} | SQL table: {table_name}")
 
-# --- Example runs ---
-if __name__ == "__main__":
-    # Uncomment to run a full baseline scan
-    # full_tenant_scan(include_personal=True)
+# --- JSON Directory Scanner (Lakehouse) ---
 
-    # Run incremental for last 24h
-    since_iso = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(timespec="seconds").replace("+00:00","Z")
-    incremental_update(since_iso, include_personal=True)
+def scan_json_directory_for_connections(
+    json_dir_path: str,
+    curated_dir: str = CURATED_DIR,
+    table_name: str = "tenant_cloud_connections",
+    merge_with_existing: bool = True
+) -> None:
+    """
+    Scans all JSON files in a lakehouse directory and extracts cloud connection information.
+    
+    Args:
+        json_dir_path: Path to directory containing JSON files (e.g., "lakehouse:/Default/Files/scanner/raw")
+        curated_dir: Output directory for curated parquet files
+        table_name: Name of the SQL table to create/update
+        merge_with_existing: If True, merge with existing data; if False, overwrite
+    """
+    print(f"Scanning JSON files in directory: {json_dir_path}")
+    
+    if mssparkutils is None:
+        raise RuntimeError("JSON directory scanning requires mssparkutils (Fabric environment)")
+    
+    try:
+        # List all JSON files in directory
+        files = mssparkutils.fs.ls(json_dir_path)
+        json_files = [f.path for f in files if f.path.endswith('.json')]
+        
+        if not json_files:
+            print(f"No JSON files found in {json_dir_path}")
+            return
+        
+        print(f"Found {len(json_files)} JSON file(s) to process")
+        
+        all_rows = []
+        for json_path in json_files:
+            try:
+                # Read JSON file
+                content = mssparkutils.fs.head(json_path, 10485760)  # Read up to 10MB
+                payload = json.loads(content)
+                
+                # Extract workspace sidecar if present
+                sidecar = payload.get("workspace_sidecar", {})
+                
+                # Flatten and extract connections
+                rows = flatten_scan_payload(payload, sidecar)
+                all_rows.extend(rows)
+                print(f"  Processed {json_path}: {len(rows)} connection(s)")
+                
+            except Exception as e:
+                print(f"  Warning: Failed to process {json_path}: {e}")
+                continue
+        
+        if not all_rows:
+            print("No connection rows extracted from JSON files.")
+            return
+        
+        # Create DataFrame and deduplicate
+        df_new = spark.createDataFrame(all_rows)
+        df_new = (
+            df_new.withColumn("connector", F.lower(F.coalesce(F.col("connector"), F.lit("unknown"))))
+                  .dropDuplicates(["workspace_id","item_id","connector","server","database","endpoint"])
+        )
+        
+        # Merge or overwrite
+        if merge_with_existing:
+            try:
+                df_existing = spark.read.parquet(curated_dir)
+                df_merged = (
+                    df_existing.unionByName(df_new, allowMissingColumns=True)
+                    .dropDuplicates(["workspace_id","item_id","connector","server","database","endpoint"])
+                )
+                print(f"Merged {df_new.count()} new rows with existing data")
+            except Exception:
+                df_merged = df_new
+                print("No existing data found, creating new table")
+        else:
+            df_merged = df_new
+            print("Overwriting existing data")
+        
+        # Write output
+        df_merged.write.mode("overwrite").parquet(curated_dir)
+        
+        spark.sql(f"DROP TABLE IF EXISTS {table_name}")
+        spark.sql(f"CREATE TABLE {table_name} USING PARQUET LOCATION '{curated_dir}'")
+        
+        print(f"JSON directory scan completed. Total rows: {df_merged.count()}")
+        print(f"Curated path: {curated_dir} | SQL table: {table_name}")
+        
+    except Exception as e:
+        print(f"Error scanning JSON directory: {e}")
+        raise
+
+
+# --- Orchestrator: Choose Any Combination of Features ---
+
+def run_cloud_connection_scan(
+    enable_full_scan: bool = False,
+    enable_incremental_scan: bool = True,
+    enable_json_directory_scan: bool = False,
+    include_personal: bool = True,
+    incremental_days_back: int = 1,
+    json_directory_path: str = None,
+    json_merge_with_existing: bool = True,
+    curated_dir: str = CURATED_DIR,
+    table_name: str = "tenant_cloud_connections"
+) -> None:
+    """
+    Orchestrates cloud connection scanning with configurable features.
+    
+    Args:
+        enable_full_scan: Run full tenant scan (baseline)
+        enable_incremental_scan: Run incremental scan for modified workspaces
+        enable_json_directory_scan: Scan JSON files in a lakehouse directory
+        include_personal: Include personal workspaces in API scans
+        incremental_days_back: Number of days to look back for incremental scan
+        json_directory_path: Path to directory containing JSON files (required if enable_json_directory_scan=True)
+        json_merge_with_existing: Merge JSON scan results with existing data
+        curated_dir: Output directory for curated data
+        table_name: SQL table name for results
+    """
+    print("="*80)
+    print("Cloud Connection Scanner - Feature Selection")
+    print("="*80)
+    print(f"Full Tenant Scan:        {'ENABLED' if enable_full_scan else 'DISABLED'}")
+    print(f"Incremental Scan:        {'ENABLED' if enable_incremental_scan else 'DISABLED'}")
+    print(f"JSON Directory Scan:     {'ENABLED' if enable_json_directory_scan else 'DISABLED'}")
+    print(f"Include Personal WS:     {include_personal}")
+    print(f"Incremental Days Back:   {incremental_days_back}")
+    print(f"JSON Directory Path:     {json_directory_path or 'Not specified'}")
+    print(f"Output Table:            {table_name}")
+    print("="*80)
+    
+    features_enabled = sum([enable_full_scan, enable_incremental_scan, enable_json_directory_scan])
+    if features_enabled == 0:
+        print("\nWARNING: No features enabled. Nothing to do.")
+        return
+    
+    # Feature 1: Full Tenant Scan
+    if enable_full_scan:
+        print("\n[1/3] Running FULL TENANT SCAN...")
+        try:
+            full_tenant_scan(
+                include_personal=include_personal,
+                curated_dir=curated_dir,
+                table_name=table_name
+            )
+            print("✓ Full tenant scan completed successfully")
+        except Exception as e:
+            print(f"✗ Full tenant scan failed: {e}")
+            raise
+    
+    # Feature 2: Incremental Scan
+    if enable_incremental_scan:
+        print("\n[2/3] Running INCREMENTAL SCAN...")
+        try:
+            since_iso = (
+                datetime.now(timezone.utc) - timedelta(days=incremental_days_back)
+            ).isoformat(timespec="seconds").replace("+00:00", "Z")
+            
+            incremental_update(
+                modified_since_iso=since_iso,
+                include_personal=include_personal,
+                curated_dir=curated_dir,
+                table_name=table_name
+            )
+            print("✓ Incremental scan completed successfully")
+        except Exception as e:
+            print(f"✗ Incremental scan failed: {e}")
+            raise
+    
+    # Feature 3: JSON Directory Scan
+    if enable_json_directory_scan:
+        print("\n[3/3] Running JSON DIRECTORY SCAN...")
+        if not json_directory_path:
+            raise ValueError("json_directory_path is required when enable_json_directory_scan=True")
+        
+        try:
+            scan_json_directory_for_connections(
+                json_dir_path=json_directory_path,
+                curated_dir=curated_dir,
+                table_name=table_name,
+                merge_with_existing=json_merge_with_existing
+            )
+            print("✓ JSON directory scan completed successfully")
+        except Exception as e:
+            print(f"✗ JSON directory scan failed: {e}")
+            raise
+    
+    print("\n" + "="*80)
+    print("SCAN COMPLETE - All enabled features executed successfully")
+    print("="*80)
+
+
+# --- Example Usage Patterns ---
+
+if __name__ == "__main__":
+    # EXAMPLE 1: Run only incremental scan (default behavior)
+    # run_cloud_connection_scan(
+    #     enable_incremental_scan=True,
+    #     incremental_days_back=1
+    # )
+    
+    # EXAMPLE 2: Run full scan only (baseline)
+    # run_cloud_connection_scan(
+    #     enable_full_scan=True,
+    #     enable_incremental_scan=False
+    # )
+    
+    # EXAMPLE 3: Run JSON directory scan only
+    # run_cloud_connection_scan(
+    #     enable_full_scan=False,
+    #     enable_incremental_scan=False,
+    #     enable_json_directory_scan=True,
+    #     json_directory_path="lakehouse:/Default/Files/scanner/raw/full",
+    #     json_merge_with_existing=True
+    # )
+    
+    # EXAMPLE 4: Combine full scan + JSON directory scan
+    # run_cloud_connection_scan(
+    #     enable_full_scan=True,
+    #     enable_incremental_scan=False,
+    #     enable_json_directory_scan=True,
+    #     json_directory_path="lakehouse:/Default/Files/scanner/raw",
+    #     json_merge_with_existing=False
+    # )
+    
+    # EXAMPLE 5: All features enabled
+    # run_cloud_connection_scan(
+    #     enable_full_scan=True,
+    #     enable_incremental_scan=True,
+    #     enable_json_directory_scan=True,
+    #     json_directory_path="lakehouse:/Default/Files/scanner/archived",
+    #     incremental_days_back=7,
+    #     include_personal=True
+    # )
+    
+    # Default: Run incremental scan only
+    run_cloud_connection_scan(
+        enable_incremental_scan=True,
+        incremental_days_back=1
+    )
