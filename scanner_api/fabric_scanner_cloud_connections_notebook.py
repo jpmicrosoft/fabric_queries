@@ -16,9 +16,12 @@ from pyspark.sql import Row
 import pyspark.sql.functions as F
 
 try:
-    import mssparkutils
+    from notebookutils import mssparkutils
 except ImportError:
-    mssparkutils = None
+    try:
+        import mssparkutils
+    except ImportError:
+        mssparkutils = None
 
 # --- Authentication mode ---
 USE_DELEGATED = True  # True -> Delegated; False -> Service Principal
@@ -39,7 +42,7 @@ SCAN_TIMEOUT_MINUTES   = 30
 
 # Spark-relative paths (no lakehouse:// prefix needed for Spark operations)
 RAW_DIR     = "Files/scanner/raw"
-CURATED_DIR = "Tables/connections"
+CURATED_DIR = "Tables/dbo"
 
 # Helper function to convert Spark paths to mssparkutils paths
 def _to_lakehouse_path(spark_path: str) -> str:
