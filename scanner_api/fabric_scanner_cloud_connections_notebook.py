@@ -37,13 +37,26 @@ MAX_PARALLEL_SCANS     = 16
 POLL_INTERVAL_SECONDS  = 30
 SCAN_TIMEOUT_MINUTES   = 30
 
-RAW_DIR     = "lakehouse:/Default/Files/scanner/raw"
-CURATED_DIR = "lakehouse:/Default/curated/connections"
+# Spark-relative paths (no lakehouse:// prefix needed for Spark operations)
+RAW_DIR     = "Files/scanner/raw"
+CURATED_DIR = "Tables/connections"
+
+# Helper function to convert Spark paths to mssparkutils paths
+def _to_lakehouse_path(spark_path: str) -> str:
+    """Convert Spark-relative path to mssparkutils lakehouse URI format."""
+    if spark_path.startswith("lakehouse://"):
+        return spark_path
+    # For Files/ paths, use abfss format or lakehouse URI
+    if spark_path.startswith("Files/"):
+        return f"/lakehouse/default/{spark_path}"
+    # For Tables/ paths, they're managed tables and don't need filesystem operations
+    return f"/lakehouse/default/{spark_path}"
 
 if mssparkutils is not None:
-    for path in [RAW_DIR, CURATED_DIR]:
+    for path in [RAW_DIR]:  # Only create Files/ directories, Tables are managed by Spark
         try:
-            mssparkutils.fs.mkdirs(path)
+            lakehouse_path = _to_lakehouse_path(path)
+            mssparkutils.fs.mkdirs(lakehouse_path)
         except Exception:
             pass
 
@@ -173,7 +186,7 @@ def run_one_batch(batch_meta: List[Dict[str, Any]]) -> Dict[str, Any]:
     payload["workspace_sidecar"] = sidecar
     if mssparkutils is not None:
         try:
-            raw_path = f"{RAW_DIR}/full/{scan_id}.json"
+            raw_path = f"{_to_lakehouse_path(RAW_DIR)}/full/{scan_id}.json"
             mssparkutils.fs.put(raw_path, json.dumps(payload))
         except Exception:
             pass
@@ -455,7 +468,7 @@ def run_one_batch_incremental(batch_meta: List[Dict[str, Any]]) -> Dict[str, Any
     payload["workspace_sidecar"] = sidecar
     if mssparkutils is not None:
         try:
-            raw_path = f"{RAW_DIR}/incremental/{scan_id}.json"
+            raw_path = f"{_to_lakehouse_path(RAW_DIR)}/incremental/{scan_id}.json"
             mssparkutils.fs.put(raw_path, json.dumps(payload))
         except Exception:
             pass
@@ -536,9 +549,12 @@ def scan_json_directory_for_connections(
     if mssparkutils is None:
         raise RuntimeError("JSON directory scanning requires mssparkutils (Fabric environment)")
     
+    # Convert to lakehouse path if needed
+    lakehouse_json_path = json_dir_path if json_dir_path.startswith(("/lakehouse/", "lakehouse://", "abfss://")) else _to_lakehouse_path(json_dir_path)
+    
     try:
         # List all JSON files in directory
-        files = mssparkutils.fs.ls(json_dir_path)
+        files = mssparkutils.fs.ls(lakehouse_json_path)
         json_files = [f.path for f in files if f.path.endswith('.json')]
         
         if not json_files:

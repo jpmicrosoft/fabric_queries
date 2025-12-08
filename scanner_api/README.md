@@ -33,6 +33,29 @@ Scans all JSON files in a lakehouse directory (e.g., previously saved scanner AP
    - **Delegated Fabric Admin** (default): set `USE_DELEGATED = True`. Run inside Fabric notebooks.
    - **Service Principal (SPN)** for automation: set `USE_DELEGATED = False` and provide `TENANT_ID`, `CLIENT_ID`, `CLIENT_SECRET`.
 
+## Configuration
+
+### Path Configuration
+
+The script uses **Spark-relative paths** for simplicity. You can customize the storage locations:
+
+```python
+# Spark-relative paths (recommended format)
+RAW_DIR     = "Files/scanner/raw"           # Raw JSON responses
+CURATED_DIR = "Tables/connections"          # Curated Parquet output
+
+# Or use your own folder structure:
+RAW_DIR     = "Files/myfolder/folder2/folder3"
+CURATED_DIR = "Tables/myoutput"
+```
+
+**Path formats supported:**
+- ✅ **Spark-relative**: `"Files/myfolder/subfolder"` or `"Tables/mytable"` (recommended)
+- ✅ **Lakehouse URI**: `"lakehouse:/Default/Files/myfolder"` (also works)
+- ✅ **Absolute paths**: `"/lakehouse/default/Files/myfolder"` (for advanced use)
+
+The script automatically converts paths for `mssparkutils.fs` operations when needed.
+
 ## How to Use
 
 ### Quick Start - Using the Orchestrator Function
