@@ -47,13 +47,16 @@ CURATED_DIR = "Tables/dbo"
 # Helper function to convert Spark paths to mssparkutils paths
 def _to_lakehouse_path(spark_path: str) -> str:
     """Convert Spark-relative path to mssparkutils lakehouse URI format."""
-    if spark_path.startswith("lakehouse://"):
+    if spark_path.startswith(("file:", "abfss:", "lakehouse:")):
         return spark_path
-    # For Files/ paths, use abfss format or lakehouse URI
+    # For Files/ paths, use file: prefix for mssparkutils
     if spark_path.startswith("Files/"):
-        return f"/lakehouse/default/{spark_path}"
+        return f"file:/lakehouse/default/{spark_path}"
+    # For absolute paths starting with /lakehouse/
+    if spark_path.startswith("/lakehouse/"):
+        return f"file:{spark_path}"
     # For Tables/ paths, they're managed tables and don't need filesystem operations
-    return f"/lakehouse/default/{spark_path}"
+    return f"file:/lakehouse/default/{spark_path}"
 
 if mssparkutils is not None:
     for path in [RAW_DIR]:  # Only create Files/ directories, Tables are managed by Spark
@@ -553,7 +556,7 @@ def scan_json_directory_for_connections(
         raise RuntimeError("JSON directory scanning requires mssparkutils (Fabric environment)")
     
     # Convert to lakehouse path if needed
-    lakehouse_json_path = json_dir_path if json_dir_path.startswith(("/lakehouse/", "lakehouse://", "abfss://")) else _to_lakehouse_path(json_dir_path)
+    lakehouse_json_path = json_dir_path if json_dir_path.startswith(("file:", "abfss:", "lakehouse:")) else _to_lakehouse_path(json_dir_path)
     
     try:
         # List all JSON files in directory
