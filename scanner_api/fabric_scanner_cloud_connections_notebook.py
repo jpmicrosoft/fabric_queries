@@ -23,8 +23,11 @@ except ImportError:
     except ImportError:
         mssparkutils = None
 
-# --- Authentication mode ---
+# --- Configuration ---
 USE_DELEGATED = True  # True -> Delegated; False -> Service Principal
+DEBUG_MODE = False    # Set to True for detailed JSON structure logging
+JSON_SINGLE_FILE_MODE = False  # Set to True to process only one specific JSON file
+JSON_TARGET_FILE = "Files/scanner/raw/scan_result_20241208.json"  # Target file when JSON_SINGLE_FILE_MODE is True
 
 # --- Service Principal secrets (override or use env/Key Vault) ---
 TENANT_ID      = os.getenv("FABRIC_SP_TENANT_ID", "<YOUR_TENANT_ID>")
@@ -556,37 +559,60 @@ def scan_json_directory_for_connections(
         table_name: Name of the SQL table to create/update
         merge_with_existing: If True, merge with existing data; if False, overwrite
     """
-    print(f"Scanning JSON files in directory: {json_dir_path}")
-    
     if mssparkutils is None:
         raise RuntimeError("JSON directory scanning requires mssparkutils (Fabric environment)")
     
-    # Convert to lakehouse path if needed
-    lakehouse_json_path = json_dir_path if json_dir_path.startswith(("file:", "abfss:", "lakehouse:")) else _to_lakehouse_path(json_dir_path)
+    # Check if single file mode is enabled
+    if JSON_SINGLE_FILE_MODE:
+        print(f"Single file mode enabled - processing: {JSON_TARGET_FILE}")
+        lakehouse_json_path = _to_lakehouse_path(JSON_TARGET_FILE)
+        
+        # Create a file info object for the single file
+        try:
+            file_info = mssparkutils.fs.head(lakehouse_json_path, 0)  # Just to verify file exists
+            # Get file size
+            import subprocess
+            # Since we can't get file info directly, we'll proceed with reading
+            json_files = [type('obj', (object,), {'path': lakehouse_json_path, 'size': 0})]  # Dummy size
+        except Exception as e:
+            print(f"Error: Could not access file {JSON_TARGET_FILE}: {e}")
+            return
+    else:
+        print(f"Scanning JSON files in directory: {json_dir_path}")
+        
+        # Convert to lakehouse path if needed
+        lakehouse_json_path = json_dir_path if json_dir_path.startswith(("file:", "abfss:", "lakehouse:")) else _to_lakehouse_path(json_dir_path)
+        
+        try:
+            # List all JSON files in directory
+            files = mssparkutils.fs.ls(lakehouse_json_path)
+            json_files = [f for f in files if f.path.endswith('.json')]
+            
+            if not json_files:
+                print(f"No JSON files found in {json_dir_path}")
+                return
+            
+            print(f"Found {len(json_files)} JSON file(s) to process")
+        except Exception as e:
+            print(f"Error listing directory {json_dir_path}: {e}")
+            return
     
     try:
-        # List all JSON files in directory
-        files = mssparkutils.fs.ls(lakehouse_json_path)
-        json_files = [f for f in files if f.path.endswith('.json')]
-        
-        if not json_files:
-            print(f"No JSON files found in {json_dir_path}")
-            return
-        
-        print(f"Found {len(json_files)} JSON file(s) to process")
-        
         all_rows = []
         for file_info in json_files:
             try:
                 # Read entire JSON file (supports files up to 2GB)
                 json_path = file_info.path
-                file_size_mb = file_info.size / 1024 / 1024
                 
-                if file_info.size > 2 * 1024 * 1024 * 1024:  # Skip files larger than 2GB
-                    print(f"  Skipping {json_path}: file too large ({file_size_mb:.1f} MB)")
-                    continue
-                
-                print(f"  Reading {json_path} ({file_size_mb:.1f} MB)...")
+                # Only check file size if we have it (not in single file mode with dummy size)
+                if hasattr(file_info, 'size') and file_info.size > 0:
+                    file_size_mb = file_info.size / 1024 / 1024
+                    if file_info.size > 2 * 1024 * 1024 * 1024:  # Skip files larger than 2GB
+                        print(f"  Skipping {json_path}: file too large ({file_size_mb:.1f} MB)")
+                        continue
+                    print(f"  Reading {json_path} ({file_size_mb:.1f} MB)...")
+                else:
+                    print(f"  Reading {json_path}...")
                 
                 # Use Spark to read JSON file - handles large files efficiently
                 # Convert file: URI back to Spark-relative path
@@ -595,28 +621,44 @@ def scan_json_directory_for_connections(
                 
                 payload = json.loads(json_text)
                 
+                # Debug: Show payload structure (only if DEBUG_MODE enabled)
+                if DEBUG_MODE:
+                    print(f"  Payload type: {type(payload).__name__}")
+                    if isinstance(payload, dict):
+                        print(f"  Payload keys: {list(payload.keys())}")
+                    elif isinstance(payload, list):
+                        print(f"  Payload list length: {len(payload)}")
+                        if payload and isinstance(payload[0], dict):
+                            print(f"  First item keys: {list(payload[0].keys())}")
+                
                 # Handle different JSON structures
                 if isinstance(payload, list):
                     # If payload is a list, process each item
-                    print(f"  Processing list of {len(payload)} item(s) from {json_path}")
-                    for item in payload:
+                    if DEBUG_MODE:
+                        print(f"  Processing list of {len(payload)} item(s)")
+                    for idx, item in enumerate(payload):
                         if isinstance(item, dict):
                             # Each item should have workspace_sidecar at its root
                             sidecar = item.get("workspace_sidecar", {})
                             rows = flatten_scan_payload(item, sidecar)
                             all_rows.extend(rows)
+                            if DEBUG_MODE:
+                                print(f"    Item {idx+1}: extracted {len(rows)} row(s)")
                         else:
-                            print(f"    Skipping non-dict item in list: {type(item).__name__}")
+                            print(f"    Item {idx+1}: skipping non-dict item: {type(item).__name__}")
                 elif isinstance(payload, dict):
                     # If payload is a dict, process it directly
                     sidecar = payload.get("workspace_sidecar", {})
                     rows = flatten_scan_payload(payload, sidecar)
                     all_rows.extend(rows)
+                    if DEBUG_MODE:
+                        print(f"  Extracted {len(rows)} row(s)")
                 else:
-                    print(f"  Skipping {json_path}: unexpected type {type(payload).__name__}")
+                    print(f"  Skipping: unexpected type {type(payload).__name__}")
                     continue
                 
-                print(f"  Processed {json_path}: extracted connection data")
+                if DEBUG_MODE:
+                    print(f"  Completed processing {json_path}")
                 
             except json.JSONDecodeError as e:
                 print(f"  Warning: Failed to parse JSON {json_path}: {e}")
