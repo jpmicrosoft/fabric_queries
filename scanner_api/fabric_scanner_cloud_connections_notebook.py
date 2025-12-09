@@ -582,11 +582,12 @@ def scan_json_directory_for_connections(
                 
                 print(f"  Reading {json_path} ({file_size_mb:.1f} MB)...")
                 
-                # Read full file content using head with 2GB limit
-                # mssparkutils.fs.head() reads up to specified bytes (2GB = 2147483648 bytes)
-                content = mssparkutils.fs.head(json_path, 2147483648)
+                # Use Spark to read JSON file - handles large files efficiently
+                # Convert file: URI back to Spark-relative path
+                spark_path = json_path.replace("file:/lakehouse/default/", "")
+                json_text = spark.read.text(spark_path, wholetext=True).first()[0]
                 
-                payload = json.loads(content)
+                payload = json.loads(json_text)
                 
                 # Extract workspace sidecar if present
                 sidecar = payload.get("workspace_sidecar", {})
