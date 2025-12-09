@@ -589,13 +589,25 @@ def scan_json_directory_for_connections(
                 
                 payload = json.loads(json_text)
                 
-                # Extract workspace sidecar if present
-                sidecar = payload.get("workspace_sidecar", {})
+                # Handle different JSON structures
+                if isinstance(payload, list):
+                    # If payload is a list, process each item
+                    print(f"  Processing list of {len(payload)} item(s) from {json_path}")
+                    for item in payload:
+                        if isinstance(item, dict):
+                            sidecar = item.get("workspace_sidecar", {})
+                            rows = flatten_scan_payload(item, sidecar)
+                            all_rows.extend(rows)
+                elif isinstance(payload, dict):
+                    # If payload is a dict, process it directly
+                    sidecar = payload.get("workspace_sidecar", {})
+                    rows = flatten_scan_payload(payload, sidecar)
+                    all_rows.extend(rows)
+                else:
+                    print(f"  Skipping {json_path}: unexpected type {type(payload).__name__}")
+                    continue
                 
-                # Flatten and extract connections
-                rows = flatten_scan_payload(payload, sidecar)
-                all_rows.extend(rows)
-                print(f"  Processed {json_path}: {len(rows)} connection(s)")
+                print(f"  Processed {json_path}: extracted connection data")
                 
             except Exception as e:
                 print(f"  Warning: Failed to process {json_path}: {e}")
