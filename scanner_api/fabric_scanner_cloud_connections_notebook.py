@@ -292,12 +292,20 @@ def run_one_batch(batch_meta: List[Dict[str, Any]]) -> Dict[str, Any]:
     
     # Extract workspace users/owners from scan result
     ws_users_map = {}
-    for ws in (payload.get("workspaces") or []):
+    workspaces_data = payload.get("workspaces") if isinstance(payload, dict) else []
+    if not isinstance(workspaces_data, list):
+        workspaces_data = []
+    
+    for ws in workspaces_data:
+        if not isinstance(ws, dict):
+            continue
         ws_id = ws.get("id")
         users = ws.get("users") or []
+        if not isinstance(users, list):
+            users = []
         # Get workspace admins/owners
         admins = [u.get("emailAddress") or u.get("identifier") 
-                  for u in users if u.get("workspaceUserAccessRight") in {"Admin", "Member"}]
+                  for u in users if isinstance(u, dict) and u.get("workspaceUserAccessRight") in {"Admin", "Member"}]
         ws_users_map[ws_id] = ", ".join(admins[:5]) if admins else None  # Limit to first 5
     
     sidecar = {
