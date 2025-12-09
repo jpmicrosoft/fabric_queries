@@ -153,9 +153,23 @@ def post_workspace_info(workspace_ids: List[str]) -> str:
     }
     r = requests.post(url, headers=HEADERS, json=body)
     r.raise_for_status()
-    scan_id = (r.json() or {}).get("scanId")
+    
+    response_data = r.json() or {}
+    
+    # Handle different response structures
+    # Per Microsoft docs: response is {"id": "uuid", "createdDateTime": "...", "status": "..."}
+    if isinstance(response_data, dict):
+        scan_id = response_data.get("id") or response_data.get("scanId")  # Check "id" first (official field name)
+    elif isinstance(response_data, str):
+        scan_id = response_data
+    else:
+        scan_id = None
+    
     if not scan_id:
-        raise RuntimeError("No scanId returned by getInfo.")
+        if DEBUG_MODE:
+            print(f"DEBUG: getInfo response type: {type(response_data)}")
+            print(f"DEBUG: getInfo response content: {response_data}")
+        raise RuntimeError(f"No scan ID returned by getInfo. Response: {response_data}")
     return scan_id
 
 
