@@ -218,6 +218,12 @@ def _build_target(server, database, endpoint):
 
 def flatten_scan_payload(payload: Dict[str, Any], ws_sidecar: Dict[str, Dict[str, str]]) -> List[Row]:
     rows: List[Row] = []
+    
+    # Validate payload is a dictionary
+    if not isinstance(payload, dict):
+        print(f"Warning: flatten_scan_payload received {type(payload).__name__} instead of dict, skipping")
+        return rows
+    
     for ws in (payload.get("workspaces") or []):
         ws_id   = ws.get("id")
         itemset = ws.get("items") or []
@@ -595,9 +601,12 @@ def scan_json_directory_for_connections(
                     print(f"  Processing list of {len(payload)} item(s) from {json_path}")
                     for item in payload:
                         if isinstance(item, dict):
+                            # Each item should have workspace_sidecar at its root
                             sidecar = item.get("workspace_sidecar", {})
                             rows = flatten_scan_payload(item, sidecar)
                             all_rows.extend(rows)
+                        else:
+                            print(f"    Skipping non-dict item in list: {type(item).__name__}")
                 elif isinstance(payload, dict):
                     # If payload is a dict, process it directly
                     sidecar = payload.get("workspace_sidecar", {})
@@ -608,6 +617,10 @@ def scan_json_directory_for_connections(
                     continue
                 
                 print(f"  Processed {json_path}: extracted connection data")
+                
+            except json.JSONDecodeError as e:
+                print(f"  Warning: Failed to parse JSON {json_path}: {e}")
+                continue
                 
             except Exception as e:
                 print(f"  Warning: Failed to process {json_path}: {e}")
