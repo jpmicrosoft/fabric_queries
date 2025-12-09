@@ -24,8 +24,8 @@ except ImportError:
         mssparkutils = None
 
 # --- Configuration ---
-USE_DELEGATED = True  # True -> Delegated; False -> Service Principal
-DEBUG_MODE = True     # Set to True for detailed JSON structure logging
+USE_DELEGATED = False  # True -> Delegated; False -> Service Principal
+DEBUG_MODE = False     # Set to True for detailed JSON structure logging
 JSON_SINGLE_FILE_MODE = False  # Set to True to process only one specific JSON file
 JSON_TARGET_FILE = "Files/scanner/raw/scan_result_20241208.json"  # Target file when JSON_SINGLE_FILE_MODE is True
 
