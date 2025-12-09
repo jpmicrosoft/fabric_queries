@@ -572,8 +572,20 @@ def scan_json_directory_for_connections(
         all_rows = []
         for json_path in json_files:
             try:
-                # Read JSON file
-                content = mssparkutils.fs.head(json_path, 10485760)  # Read up to 10MB
+                # Read entire JSON file (supports files up to 2GB)
+                file_info = [f for f in files if f.path == json_path][0]
+                file_size_mb = file_info.size / 1024 / 1024
+                
+                if file_info.size > 2 * 1024 * 1024 * 1024:  # Skip files larger than 2GB
+                    print(f"  Skipping {json_path}: file too large ({file_size_mb:.1f} MB)")
+                    continue
+                
+                print(f"  Reading {json_path} ({file_size_mb:.1f} MB)...")
+                
+                # Read full file content
+                with mssparkutils.fs.open(json_path, "r") as f:
+                    content = f.read()
+                
                 payload = json.loads(content)
                 
                 # Extract workspace sidecar if present
