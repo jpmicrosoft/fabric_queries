@@ -107,7 +107,17 @@ def get_all_workspaces(include_personal: bool = True) -> List[Dict[str, Any]]:
     r = requests.get(url, headers=HEADERS, params=params)
     r.raise_for_status()
     payload = r.json() or {}
-    return payload.get("workspaces", [])
+    
+    # Handle different response structures
+    if isinstance(payload, list):
+        workspaces = payload
+    elif isinstance(payload, dict):
+        workspaces = payload.get("workspaces", [])
+    else:
+        workspaces = []
+    
+    # Ensure all items are dicts
+    return [ws for ws in workspaces if isinstance(ws, dict)]
 
 
 def modified_workspace_ids(modified_since_iso: str, include_personal: bool = True) -> List[Dict[str, Any]]:
@@ -119,7 +129,17 @@ def modified_workspace_ids(modified_since_iso: str, include_personal: bool = Tru
     r = requests.get(url, headers=HEADERS, params=params)
     r.raise_for_status()
     payload = r.json() or {}
-    return payload.get("workspaces", [])
+    
+    # Handle different response structures
+    if isinstance(payload, list):
+        workspaces = payload
+    elif isinstance(payload, dict):
+        workspaces = payload.get("workspaces", [])
+    else:
+        workspaces = []
+    
+    # Ensure all items are dicts
+    return [ws for ws in workspaces if isinstance(ws, dict)]
 
 
 def post_workspace_info(workspace_ids: List[str]) -> str:
