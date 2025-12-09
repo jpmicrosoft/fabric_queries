@@ -582,9 +582,9 @@ def scan_json_directory_for_connections(
                 
                 print(f"  Reading {json_path} ({file_size_mb:.1f} MB)...")
                 
-                # Read full file content
-                with mssparkutils.fs.open(json_path, "r") as f:
-                    content = f.read()
+                # Read full file content using head with 2GB limit
+                # mssparkutils.fs.head() reads up to specified bytes (2GB = 2147483648 bytes)
+                content = mssparkutils.fs.head(json_path, 2147483648)
                 
                 payload = json.loads(content)
                 
