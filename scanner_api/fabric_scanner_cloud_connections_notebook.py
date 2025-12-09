@@ -142,7 +142,7 @@ def modified_workspace_ids(modified_since_iso: str, include_personal: bool = Tru
     return [ws for ws in workspaces if isinstance(ws, dict)]
 
 
-def post_workspace_info(workspace_ids: List[str]) -> str:
+def post_workspace_info(workspace_ids: List[str], max_retries: int = 3) -> str:
     if not workspace_ids:
         raise ValueError("workspace_ids cannot be empty.")
     url = f"{PBI_ADMIN_BASE}/workspaces/getInfo"
@@ -151,26 +151,42 @@ def post_workspace_info(workspace_ids: List[str]) -> str:
         "lineage": True,
         "users": True
     }
-    r = requests.post(url, headers=HEADERS, json=body)
-    r.raise_for_status()
     
-    response_data = r.json() or {}
-    
-    # Handle different response structures
-    # Per Microsoft docs: response is {"id": "uuid", "createdDateTime": "...", "status": "..."}
-    if isinstance(response_data, dict):
-        scan_id = response_data.get("id") or response_data.get("scanId")  # Check "id" first (official field name)
-    elif isinstance(response_data, str):
-        scan_id = response_data
-    else:
-        scan_id = None
-    
-    if not scan_id:
-        if DEBUG_MODE:
-            print(f"DEBUG: getInfo response type: {type(response_data)}")
-            print(f"DEBUG: getInfo response content: {response_data}")
-        raise RuntimeError(f"No scan ID returned by getInfo. Response: {response_data}")
-    return scan_id
+    for attempt in range(max_retries):
+        try:
+            r = requests.post(url, headers=HEADERS, json=body)
+            r.raise_for_status()
+            
+            response_data = r.json() or {}
+            
+            # Handle different response structures
+            # Per Microsoft docs: response is {"id": "uuid", "createdDateTime": "...", "status": "..."}
+            if isinstance(response_data, dict):
+                scan_id = response_data.get("id") or response_data.get("scanId")  # Check "id" first (official field name)
+            elif isinstance(response_data, str):
+                scan_id = response_data
+            else:
+                scan_id = None
+            
+            if not scan_id:
+                if DEBUG_MODE:
+                    print(f"DEBUG: getInfo response type: {type(response_data)}")
+                    print(f"DEBUG: getInfo response content: {response_data}")
+                raise RuntimeError(f"No scan ID returned by getInfo. Response: {response_data}")
+            return scan_id
+            
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 429:  # Rate limit exceeded
+                retry_after = int(e.response.headers.get('Retry-After', 60))  # Default to 60 seconds
+                print(f"⚠️ Rate limit exceeded (429). Waiting {retry_after} seconds before retry {attempt + 1}/{max_retries}...")
+                if attempt < max_retries - 1:
+                    time.sleep(retry_after)
+                else:
+                    print(f"❌ Rate limit exceeded. Maximum retries reached. Please wait at least 1 hour before trying again.")
+                    print(f"   API Limits: 500 requests/hour, 16 simultaneous requests")
+                    raise
+            else:
+                raise
 
 
 def poll_scan_status(scan_id: str) -> None:
@@ -612,6 +628,113 @@ def full_tenant_scan(include_personal: bool = True,
 
     print(f"Full tenant scan completed. Curated path: {curated_dir} | SQL table: {table_name}")
 
+# --- Full tenant scan with rate limit management (for large tenants) ---
+
+def full_tenant_scan_chunked(include_personal: bool = True,
+                              max_batches_per_hour: int = 450,  # Leave buffer under 500/hour limit
+                              curated_dir: str = CURATED_DIR,
+                              table_name: str = "tenant_cloud_connections") -> None:
+    """
+    Full tenant scan with automatic rate limit management for very large tenants.
+    Processes workspaces in hourly chunks, respecting the 500 API calls/hour limit.
+    Merges results incrementally to avoid losing progress.
+    
+    Args:
+        include_personal: Include personal workspaces
+        max_batches_per_hour: Max API calls per hour (default 450 for safety margin)
+        curated_dir: Output directory
+        table_name: SQL table name
+    """
+    ws_min = get_all_workspaces(include_personal=include_personal)
+    if not ws_min:
+        print("No workspaces discovered.")
+        return
+
+    print(f"📊 Discovered {len(ws_min)} workspaces (include_personal={include_personal}).")
+    
+    ws_list = [{
+        "id":   w.get("id"),
+        "name": w.get("name", ""),
+        "type": (str(w.get("type")).lower() if w.get("type") else "unknown")
+    } for w in ws_min if w.get("id")]
+
+    all_batches = [ws_list[i:i+BATCH_SIZE_WORKSPACES] for i in range(0, len(ws_list), BATCH_SIZE_WORKSPACES)]
+    total_batches = len(all_batches)
+    
+    print(f"📦 Total batches needed: {total_batches} (100 workspaces each)")
+    print(f"⏱️  Estimated time: {total_batches / max_batches_per_hour:.1f} hours")
+    print(f"🔄 Processing in chunks of {max_batches_per_hour} batches/hour to respect rate limits...")
+    
+    # Process in hourly chunks
+    for chunk_idx in range(0, total_batches, max_batches_per_hour):
+        chunk_start = chunk_idx
+        chunk_end = min(chunk_idx + max_batches_per_hour, total_batches)
+        chunk_batches = all_batches[chunk_start:chunk_end]
+        
+        print(f"\n{'='*60}")
+        print(f"🔹 Chunk {chunk_idx // max_batches_per_hour + 1}: Processing batches {chunk_start+1}-{chunk_end} of {total_batches}")
+        print(f"{'='*60}")
+        
+        chunk_start_time = time.time()
+        scan_payloads: List[Dict[str, Any]] = []
+        
+        with ThreadPoolExecutor(max_workers=MAX_PARALLEL_SCANS) as pool:
+            futures = [pool.submit(run_one_batch, b) for b in chunk_batches]
+            for fut in as_completed(futures):
+                scan_payloads.append(fut.result())
+        
+        print(f"✅ Completed {len(scan_payloads)} batches in this chunk.")
+        
+        # Flatten and save this chunk's results
+        all_rows = []
+        for payload in scan_payloads:
+            sidecar = payload.get("workspace_sidecar", {})
+            all_rows.extend(flatten_scan_payload(payload, sidecar))
+        
+        if all_rows:
+            df_new = spark.createDataFrame(all_rows)
+            df_new = (
+                df_new.withColumn("connector", F.lower(F.coalesce(F.col("connector"), F.lit("unknown"))))
+                      .dropDuplicates(["workspace_id","item_id","connector","server","database","endpoint"])
+            )
+            
+            # Merge with existing data if table exists
+            try:
+                df_existing = spark.read.parquet(curated_dir)
+                df_combined = df_existing.union(df_new).dropDuplicates(
+                    ["workspace_id","item_id","connector","server","database","endpoint"]
+                )
+                df_combined.write.mode("overwrite").parquet(curated_dir)
+                print(f"💾 Merged {len(all_rows)} new rows with existing data.")
+            except Exception:
+                # First chunk - no existing data
+                df_new.write.mode("overwrite").parquet(curated_dir)
+                print(f"💾 Saved {len(all_rows)} rows (initial write).")
+            
+            # Update SQL table
+            spark.sql(f"DROP TABLE IF EXISTS {table_name}")
+            spark.sql(f"CREATE TABLE {table_name} USING PARQUET LOCATION '{curated_dir}'")
+        
+        # Check if we need to wait before next chunk
+        if chunk_end < total_batches:
+            chunk_elapsed = time.time() - chunk_start_time
+            wait_time = max(0, 3600 - chunk_elapsed)  # Wait until 1 hour has passed
+            
+            if wait_time > 60:
+                print(f"\n⏳ Rate limit protection: Waiting {wait_time/60:.1f} minutes before next chunk...")
+                print(f"   (Processed {chunk_end}/{total_batches} batches so far)")
+                time.sleep(wait_time)
+            elif wait_time > 0:
+                print(f"⏳ Brief pause: {wait_time:.0f} seconds...")
+                time.sleep(wait_time)
+    
+    print(f"\n{'='*60}")
+    print(f"✅ Full chunked scan completed!")
+    print(f"📊 Total batches processed: {total_batches}")
+    print(f"💾 SQL table: {table_name}")
+    print(f"📁 Curated path: {curated_dir}")
+    print(f"{'='*60}")
+
 # --- Incremental scan ---
 
 def run_one_batch_incremental(batch_meta: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -870,10 +993,12 @@ def scan_json_directory_for_connections(
 
 def run_cloud_connection_scan(
     enable_full_scan: bool = False,
+    enable_full_scan_chunked: bool = False,  # NEW: For large tenants with rate limit management
     enable_incremental_scan: bool = True,
     enable_json_directory_scan: bool = False,
     enable_scan_id_retrieval: bool = False,
     include_personal: bool = True,
+    max_batches_per_hour: int = 250,  # Conservative default - leaves 250 calls/hour for other users
     incremental_days_back: float = None,
     incremental_hours_back: float = None,
     json_directory_path: str = None,
@@ -887,11 +1012,13 @@ def run_cloud_connection_scan(
     Orchestrates cloud connection scanning with configurable features.
     
     Args:
-        enable_full_scan: Run full tenant scan (baseline)
+        enable_full_scan: Run full tenant scan (baseline) - may hit rate limits on large tenants
+        enable_full_scan_chunked: Run full tenant scan with automatic rate limit management (recommended for 10K+ workspaces)
         enable_incremental_scan: Run incremental scan for modified workspaces
         enable_json_directory_scan: Scan JSON files in a lakehouse directory
         enable_scan_id_retrieval: Retrieve results from a previous scan using scan ID
         include_personal: Include personal workspaces in API scans
+        max_batches_per_hour: Max API calls per hour for chunked scans (default 450 for safety margin under 500 limit)
         incremental_days_back: Number of days to look back for incremental scan (can be fractional, e.g., 0.5 = 12 hours)
         incremental_hours_back: Number of hours to look back for incremental scan (alternative to days, takes precedence)
         json_directory_path: Path to directory containing JSON files (required if enable_json_directory_scan=True)
@@ -916,24 +1043,56 @@ def run_cloud_connection_scan(
     print("Cloud Connection Scanner - Feature Selection")
     print("="*80)
     print(f"Full Tenant Scan:        {'ENABLED' if enable_full_scan else 'DISABLED'}")
+    print(f"Full Tenant Scan (Chunked): {'ENABLED' if enable_full_scan_chunked else 'DISABLED'}")
     print(f"Incremental Scan:        {'ENABLED' if enable_incremental_scan else 'DISABLED'}")
     print(f"JSON Directory Scan:     {'ENABLED' if enable_json_directory_scan else 'DISABLED'}")
     print(f"Scan ID Retrieval:       {'ENABLED' if enable_scan_id_retrieval else 'DISABLED'}")
     print(f"Include Personal WS:     {include_personal}")
     print(f"Incremental Lookback:    {time_display}")
+    print(f"Max Batches/Hour:        {max_batches_per_hour}")
     print(f"JSON Directory Path:     {json_directory_path or 'Not specified'}")
     print(f"Scan ID:                 {scan_id or 'Not specified'}")
     print(f"Output Table:            {table_name}")
     print("="*80)
     
-    features_enabled = sum([enable_full_scan, enable_incremental_scan, enable_json_directory_scan, enable_scan_id_retrieval])
+    features_enabled = sum([enable_full_scan, enable_full_scan_chunked, enable_incremental_scan, 
+                           enable_json_directory_scan, enable_scan_id_retrieval])
     if features_enabled == 0:
         print("\nWARNING: No features enabled. Nothing to do.")
         return
     
     # Feature 1: Full Tenant Scan
     if enable_full_scan:
-        print("\n[1/4] Running FULL TENANT SCAN...")
+        print("\n[1/5] Running FULL TENANT SCAN...")
+        try:
+            full_tenant_scan(
+                include_personal=include_personal,
+                curated_dir=curated_dir,
+                table_name=table_name
+            )
+            print("✓ Full tenant scan completed successfully")
+        except Exception as e:
+            print(f"✗ Full tenant scan failed: {e}")
+            raise
+    
+    # Feature 1b: Full Tenant Scan (Chunked with Rate Limit Management)
+    if enable_full_scan_chunked:
+        print("\n[1b/5] Running FULL TENANT SCAN (CHUNKED - Rate Limit Safe)...")
+        try:
+            full_tenant_scan_chunked(
+                include_personal=include_personal,
+                max_batches_per_hour=max_batches_per_hour,
+                curated_dir=curated_dir,
+                table_name=table_name
+            )
+            print("✓ Chunked full tenant scan completed successfully")
+        except Exception as e:
+            print(f"✗ Chunked full tenant scan failed: {e}")
+            raise
+    
+    # Feature 2: Incremental Scan
+    if enable_incremental_scan:
+        print("\n[2/5] Running INCREMENTAL SCAN...")
         try:
             full_tenant_scan(
                 include_personal=include_personal,
