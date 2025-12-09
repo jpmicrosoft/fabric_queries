@@ -561,7 +561,7 @@ def scan_json_directory_for_connections(
     try:
         # List all JSON files in directory
         files = mssparkutils.fs.ls(lakehouse_json_path)
-        json_files = [f.path for f in files if f.path.endswith('.json')]
+        json_files = [f for f in files if f.path.endswith('.json')]
         
         if not json_files:
             print(f"No JSON files found in {json_dir_path}")
@@ -570,10 +570,10 @@ def scan_json_directory_for_connections(
         print(f"Found {len(json_files)} JSON file(s) to process")
         
         all_rows = []
-        for json_path in json_files:
+        for file_info in json_files:
             try:
                 # Read entire JSON file (supports files up to 2GB)
-                file_info = [f for f in files if f.path == json_path][0]
+                json_path = file_info.path
                 file_size_mb = file_info.size / 1024 / 1024
                 
                 if file_info.size > 2 * 1024 * 1024 * 1024:  # Skip files larger than 2GB
