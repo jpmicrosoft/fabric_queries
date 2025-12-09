@@ -25,7 +25,7 @@ except ImportError:
 
 # --- Configuration ---
 USE_DELEGATED = True  # True -> Delegated; False -> Service Principal
-DEBUG_MODE = False    # Set to True for detailed JSON structure logging
+DEBUG_MODE = True     # Set to True for detailed JSON structure logging
 JSON_SINGLE_FILE_MODE = False  # Set to True to process only one specific JSON file
 JSON_TARGET_FILE = "Files/scanner/raw/scan_result_20241208.json"  # Target file when JSON_SINGLE_FILE_MODE is True
 
@@ -166,6 +166,121 @@ def read_scan_result(scan_id: str) -> Dict[str, Any]:
     r = requests.get(url, headers=HEADERS)
     r.raise_for_status()
     return r.json() or {}
+
+
+def get_scan_result_by_id(
+    scan_id: str,
+    curated_dir: str = CURATED_DIR,
+    table_name: str = "tenant_cloud_connections",
+    merge_with_existing: bool = True
+) -> None:
+    """
+    Retrieves scan result using a scan ID and processes cloud connections.
+    This uses the WorkspaceInfo GetScanResult API to fetch previously completed scan results.
+    
+    The scan result must be from a scan that completed successfully within the last 24 hours.
+    Use this function when you have a scan ID from:
+    - A previous call to PostWorkspaceInfo API
+    - A scan triggered by another process
+    - A scan ID stored for later retrieval
+    
+    Args:
+        scan_id: The scan ID (UUID) from a previous scan
+        curated_dir: Output directory for curated parquet files
+        table_name: Name of the SQL table to create/update
+        merge_with_existing: If True, merge with existing data; if False, overwrite
+    
+    Example:
+        # Get result from a scan triggered earlier today
+        get_scan_result_by_id(
+            scan_id="e7d03602-4873-4760-b37e-1563ef5358e3",
+            merge_with_existing=True
+        )
+    """
+    print(f"Fetching scan result for scan ID: {scan_id}")
+    
+    try:
+        payload = read_scan_result(scan_id)
+        
+        if not payload or not payload.get("workspaces"):
+            print(f"Warning: No workspaces found in scan result for {scan_id}")
+            return
+        
+        print(f"Retrieved scan result with {len(payload.get('workspaces', []))} workspace(s)")
+        
+        # Build workspace sidecar from the scan payload
+        sidecar = {}
+        for ws in payload.get("workspaces", []):
+            ws_id = ws.get("id")
+            if not ws_id:
+                continue
+            
+            # Extract workspace admins/owners
+            users = ws.get("users") or []
+            admins = [u.get("emailAddress") or u.get("identifier") 
+                      for u in users if u.get("groupUserAccessRight") in {"Admin", "Member"}]
+            
+            sidecar[ws_id] = {
+                "name": ws.get("name", ""),
+                "kind": str(ws.get("type", "")).lower() or "unknown",
+                "users": ", ".join(admins[:5]) if admins else None
+            }
+        
+        payload["workspace_sidecar"] = sidecar
+        
+        # Save to lakehouse if available
+        if mssparkutils is not None:
+            try:
+                raw_path = f"{_to_lakehouse_path(RAW_DIR)}/from_scan_id/{scan_id}.json"
+                mssparkutils.fs.put(raw_path, json.dumps(payload))
+                print(f"Saved scan result to: {raw_path}")
+            except Exception as e:
+                print(f"Warning: Could not save to lakehouse: {e}")
+        
+        # Extract connection rows
+        rows = flatten_scan_payload(payload, sidecar)
+        
+        if not rows:
+            print("No connection rows extracted from scan result")
+            return
+        
+        print(f"Extracted {len(rows)} connection row(s)")
+        
+        # Create DataFrame
+        df_new = spark.createDataFrame(rows)
+        
+        if merge_with_existing:
+            try:
+                df_existing = spark.read.parquet(curated_dir)
+                df_combined = df_existing.union(df_new).dropDuplicates([
+                    "workspace_id", "workspace_name", "artifact_type", "artifact_id",
+                    "artifact_name", "datasource_type", "target"
+                ])
+                df_combined.write.mode("overwrite").parquet(curated_dir)
+                print(f"Merged with existing data in {curated_dir}")
+            except Exception:
+                df_new.write.mode("overwrite").parquet(curated_dir)
+                print(f"Created new parquet in {curated_dir}")
+        else:
+            df_new.write.mode("overwrite").parquet(curated_dir)
+            print(f"Overwrote data in {curated_dir}")
+        
+        # Register or refresh SQL table
+        spark.sql(f"DROP TABLE IF EXISTS {table_name}")
+        spark.sql(f"CREATE TABLE {table_name} USING PARQUET LOCATION '{curated_dir}'")
+        print(f"Registered table: {table_name}")
+        
+    except requests.HTTPError as e:
+        if e.response.status_code == 404:
+            print(f"Error: Scan ID {scan_id} not found. The scan may have expired (>24 hours) or never existed.")
+        elif e.response.status_code == 401:
+            print(f"Error: Authentication failed. Ensure you have Fabric Admin permissions.")
+        else:
+            print(f"HTTP Error {e.response.status_code}: {e}")
+        raise
+    except Exception as e:
+        print(f"Error processing scan result: {e}")
+        raise
 
 # --- Batch runner ---
 
@@ -715,10 +830,14 @@ def run_cloud_connection_scan(
     enable_full_scan: bool = False,
     enable_incremental_scan: bool = True,
     enable_json_directory_scan: bool = False,
+    enable_scan_id_retrieval: bool = False,
     include_personal: bool = True,
-    incremental_days_back: int = 1,
+    incremental_days_back: float = None,
+    incremental_hours_back: float = None,
     json_directory_path: str = None,
     json_merge_with_existing: bool = True,
+    scan_id: str = None,
+    scan_id_merge_with_existing: bool = True,
     curated_dir: str = CURATED_DIR,
     table_name: str = "tenant_cloud_connections"
 ) -> None:
@@ -729,33 +848,50 @@ def run_cloud_connection_scan(
         enable_full_scan: Run full tenant scan (baseline)
         enable_incremental_scan: Run incremental scan for modified workspaces
         enable_json_directory_scan: Scan JSON files in a lakehouse directory
+        enable_scan_id_retrieval: Retrieve results from a previous scan using scan ID
         include_personal: Include personal workspaces in API scans
-        incremental_days_back: Number of days to look back for incremental scan
+        incremental_days_back: Number of days to look back for incremental scan (can be fractional, e.g., 0.5 = 12 hours)
+        incremental_hours_back: Number of hours to look back for incremental scan (alternative to days, takes precedence)
         json_directory_path: Path to directory containing JSON files (required if enable_json_directory_scan=True)
         json_merge_with_existing: Merge JSON scan results with existing data
+        scan_id: Scan ID to retrieve (required if enable_scan_id_retrieval=True)
+        scan_id_merge_with_existing: Merge scan ID results with existing data
         curated_dir: Output directory for curated data
         table_name: SQL table name for results
     """
+    # Calculate time window
+    if incremental_hours_back is not None:
+        lookback_hours = incremental_hours_back
+        time_display = f"{incremental_hours_back} hour(s)"
+    elif incremental_days_back is not None:
+        lookback_hours = incremental_days_back * 24
+        time_display = f"{incremental_days_back} day(s)"
+    else:
+        lookback_hours = 24  # Default to 1 day
+        time_display = "1 day (default)"
+    
     print("="*80)
     print("Cloud Connection Scanner - Feature Selection")
     print("="*80)
     print(f"Full Tenant Scan:        {'ENABLED' if enable_full_scan else 'DISABLED'}")
     print(f"Incremental Scan:        {'ENABLED' if enable_incremental_scan else 'DISABLED'}")
     print(f"JSON Directory Scan:     {'ENABLED' if enable_json_directory_scan else 'DISABLED'}")
+    print(f"Scan ID Retrieval:       {'ENABLED' if enable_scan_id_retrieval else 'DISABLED'}")
     print(f"Include Personal WS:     {include_personal}")
-    print(f"Incremental Days Back:   {incremental_days_back}")
+    print(f"Incremental Lookback:    {time_display}")
     print(f"JSON Directory Path:     {json_directory_path or 'Not specified'}")
+    print(f"Scan ID:                 {scan_id or 'Not specified'}")
     print(f"Output Table:            {table_name}")
     print("="*80)
     
-    features_enabled = sum([enable_full_scan, enable_incremental_scan, enable_json_directory_scan])
+    features_enabled = sum([enable_full_scan, enable_incremental_scan, enable_json_directory_scan, enable_scan_id_retrieval])
     if features_enabled == 0:
         print("\nWARNING: No features enabled. Nothing to do.")
         return
     
     # Feature 1: Full Tenant Scan
     if enable_full_scan:
-        print("\n[1/3] Running FULL TENANT SCAN...")
+        print("\n[1/4] Running FULL TENANT SCAN...")
         try:
             full_tenant_scan(
                 include_personal=include_personal,
@@ -769,10 +905,10 @@ def run_cloud_connection_scan(
     
     # Feature 2: Incremental Scan
     if enable_incremental_scan:
-        print("\n[2/3] Running INCREMENTAL SCAN...")
+        print("\n[2/4] Running INCREMENTAL SCAN...")
         try:
             since_iso = (
-                datetime.now(timezone.utc) - timedelta(days=incremental_days_back)
+                datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
             ).isoformat(timespec="seconds").replace("+00:00", "Z")
             
             incremental_update(
@@ -788,7 +924,7 @@ def run_cloud_connection_scan(
     
     # Feature 3: JSON Directory Scan
     if enable_json_directory_scan:
-        print("\n[3/3] Running JSON DIRECTORY SCAN...")
+        print("\n[3/4] Running JSON DIRECTORY SCAN...")
         if not json_directory_path:
             raise ValueError("json_directory_path is required when enable_json_directory_scan=True")
         
@@ -804,6 +940,24 @@ def run_cloud_connection_scan(
             print(f"✗ JSON directory scan failed: {e}")
             raise
     
+    # Feature 4: Scan ID Retrieval
+    if enable_scan_id_retrieval:
+        print("\n[4/4] Running SCAN ID RETRIEVAL...")
+        if not scan_id:
+            raise ValueError("scan_id is required when enable_scan_id_retrieval=True")
+        
+        try:
+            get_scan_result_by_id(
+                scan_id=scan_id,
+                curated_dir=curated_dir,
+                table_name=table_name,
+                merge_with_existing=scan_id_merge_with_existing
+            )
+            print("✓ Scan ID retrieval completed successfully")
+        except Exception as e:
+            print(f"✗ Scan ID retrieval failed: {e}")
+            raise
+    
     print("\n" + "="*80)
     print("SCAN COMPLETE - All enabled features executed successfully")
     print("="*80)
@@ -812,10 +966,22 @@ def run_cloud_connection_scan(
 # --- Example Usage Patterns ---
 
 if __name__ == "__main__":
-    # EXAMPLE 1: Run only incremental scan (default behavior)
+    # EXAMPLE 1: Run only incremental scan (default behavior - 1 day)
     # run_cloud_connection_scan(
     #     enable_incremental_scan=True,
     #     incremental_days_back=1
+    # )
+    
+    # EXAMPLE 1b: Run incremental scan for last 6 hours
+    # run_cloud_connection_scan(
+    #     enable_incremental_scan=True,
+    #     incremental_hours_back=6
+    # )
+    
+    # EXAMPLE 1c: Run incremental scan for last 30 minutes
+    # run_cloud_connection_scan(
+    #     enable_incremental_scan=True,
+    #     incremental_hours_back=0.5
     # )
     
     # EXAMPLE 2: Run full scan only (baseline)
@@ -833,7 +999,16 @@ if __name__ == "__main__":
     #     json_merge_with_existing=True
     # )
     
-    # EXAMPLE 4: Combine full scan + JSON directory scan
+    # EXAMPLE 4: Retrieve results from a previous scan using scan ID
+    # run_cloud_connection_scan(
+    #     enable_full_scan=False,
+    #     enable_incremental_scan=False,
+    #     enable_scan_id_retrieval=True,
+    #     scan_id="e7d03602-4873-4760-b37e-1563ef5358e3",
+    #     scan_id_merge_with_existing=True
+    # )
+    
+    # EXAMPLE 5: Combine full scan + JSON directory scan
     # run_cloud_connection_scan(
     #     enable_full_scan=True,
     #     enable_incremental_scan=False,
@@ -842,18 +1017,19 @@ if __name__ == "__main__":
     #     json_merge_with_existing=False
     # )
     
-    # EXAMPLE 5: All features enabled
+    # EXAMPLE 6: All features enabled
     # run_cloud_connection_scan(
     #     enable_full_scan=True,
     #     enable_incremental_scan=True,
     #     enable_json_directory_scan=True,
+    #     enable_scan_id_retrieval=True,
     #     json_directory_path="lakehouse:/Default/Files/scanner/archived",
     #     incremental_days_back=7,
     #     include_personal=True
     # )
     
-    # Default: Run incremental scan only
+    # Default: Run incremental scan only (last 24 hours)
     run_cloud_connection_scan(
         enable_incremental_scan=True,
-        incremental_days_back=1
+        incremental_hours_back=24
     )
