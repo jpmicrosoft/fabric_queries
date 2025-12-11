@@ -34,6 +34,9 @@ WORKSPACE_ID = "12345678-1234-1234-1234-123456789abc"
 
 # Output options
 SAVE_JSON_FILE = True  # Set to False to skip saving JSON file
+PRINT_TO_SCREEN = True  # Set to False to skip console output
+PRINT_RAW_API_RESPONSE = False  # Set to True to see the original API JSON output
+OUTPUT_PATH = None  # Set to a custom path (e.g., "/lakehouse/default/Files/") or leave as None
 ```
 
 ## Usage
@@ -46,17 +49,28 @@ python ws_scanner_api.py
 
 ### Output
 
-The script can optionally generate a JSON file based on the `SAVE_JSON_FILE` configuration:
+The script provides flexible output options:
 
-**When `SAVE_JSON_FILE = True` (default):**
-- **`workspace_{WORKSPACE_ID}_cloud_connections.json`** - Full scan results saved to current directory
-- **Console output** - Summary of findings with detailed connection information
+**File Output (`SAVE_JSON_FILE`):**
+- `True` (default): Saves `workspace_{WORKSPACE_ID}_cloud_connections.json`
+- `False`: No file created
 
-**When `SAVE_JSON_FILE = False`:**
-- **Console output only** - No file is created, results displayed in terminal
+**Console Output (`PRINT_TO_SCREEN`):**
+- `True` (default): Displays full API JSON response + formatted summary
+- `False`: Silent mode, no console output
+
+**Raw API Output (`PRINT_RAW_API_RESPONSE`):**
+- `True`: Shows the complete Scanner API JSON response
+- `False` (default): Only shows formatted summary
+
+**Custom Save Location (`OUTPUT_PATH`):**
+- `None` (default): Saves to current working directory
+- `"/lakehouse/default/Files/"`: Saves to Fabric Lakehouse (when running in Fabric notebook)
+- `"C:/MyFolder/"`: Saves to custom local path
 
 ### Output Location
 
+**Local Execution:**
 JSON files are saved in the **current working directory** where you execute the script:
 
 ```powershell
@@ -66,6 +80,24 @@ python ws_scanner_api.py
 # Output file will be saved at:
 # C:\Users\jaiperez\Documents\Wells\Fabric_Work\fabric_queries\ws_scanner_api\workspace_{WORKSPACE_ID}_cloud_connections.json
 ```
+
+**Fabric Lakehouse:**
+When running in a Fabric notebook, save to your attached Lakehouse:
+
+```python
+# Set in configuration section
+OUTPUT_PATH = "/lakehouse/default/Files/"
+
+# Or pass as parameter
+results = scan_workspace_for_cloud_connections(
+    "workspace-id",
+    output_path="/lakehouse/default/Files/"
+)
+
+# File will appear in: Lakehouse > Files > workspace_{id}_cloud_connections.json
+```
+
+**Note:** The `/lakehouse/default/` path automatically points to your notebook's attached lakehouse, regardless of the lakehouse name.
 
 ### Example Output
 
@@ -203,36 +235,78 @@ Error: Scan timed out after 10 minutes
 
 ## Advanced Usage
 
-### Console Output Only (No File)
-
-For quick checks without creating files:
-
-```python
-# In ws_scanner_api.py, set:
-SAVE_JSON_FILE = False
-
-# Then run:
-python ws_scanner_api.py
-```
-
 ### Programmatic Usage
 
-You can also import and use the function in your own scripts:
+You can import and use the function with full control over output options:
 
 ```python
 from ws_scanner_api import scan_workspace_for_cloud_connections
 
-# Save to file
-results = scan_workspace_for_cloud_connections("workspace-id", save_to_file=True)
+# Full output: file + console + formatted summary
+results = scan_workspace_for_cloud_connections(
+    "workspace-id",
+    save_to_file=True,
+    print_to_screen=True
+)
 
 # Console only (no file)
-results = scan_workspace_for_cloud_connections("workspace-id", save_to_file=False)
+results = scan_workspace_for_cloud_connections(
+    "workspace-id",
+    save_to_file=False,
+    print_to_screen=True
+)
+
+# Silent mode (return data only, no output)
+results = scan_workspace_for_cloud_connections(
+    "workspace-id",
+    save_to_file=False,
+    print_to_screen=False
+)
+
+# Show raw API JSON response
+results = scan_workspace_for_cloud_connections(
+    "workspace-id",
+    print_raw_api=True
+)
+
+# Save to Fabric Lakehouse
+results = scan_workspace_for_cloud_connections(
+    "workspace-id",
+    save_to_file=True,
+    output_path="/lakehouse/default/Files/"
+)
+
+# Save to custom local directory
+results = scan_workspace_for_cloud_connections(
+    "workspace-id",
+    save_to_file=True,
+    output_path="C:/Reports/FabricScans/"
+)
 
 # Access results
 print(f"Found {len(results['cloud_connections'])} cloud connections")
 for conn in results['cloud_connections']:
     print(f"{conn['item_name']}: {conn['connector']}")
 ```
+
+### Function Signature
+
+```python
+def scan_workspace_for_cloud_connections(
+    workspace_id: str,
+    save_to_file: bool = True,
+    print_to_screen: bool = True,
+    print_raw_api: bool = False,
+    output_path: str = None
+) -> Dict[str, Any]
+```
+
+**Parameters:**
+- `workspace_id`: Target workspace GUID
+- `save_to_file`: Save results to JSON file (default: True)
+- `print_to_screen`: Display full API JSON + formatted output to console (default: True)
+- `print_raw_api`: Display raw Scanner API response (default: False)
+- `output_path`: Custom save directory path; None = current directory (default: None)
 
 ## JSON Output Schema
 

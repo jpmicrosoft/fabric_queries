@@ -16,6 +16,8 @@ WORKSPACE_ID = "12345678-1234-1234-1234-123456789abc"  # Your workspace ID
 # Output options
 SAVE_JSON_FILE = True  # Set to False to skip saving JSON file
 PRINT_TO_SCREEN = True  # Set to False to skip console output
+PRINT_RAW_API_RESPONSE = False  # Set to True to see the original API JSON output
+OUTPUT_PATH = None  # Set to a custom path (e.g., "/lakehouse/default/Files/") or leave as None for current directory
 
 # --- Auth ---
 def get_spn_token() -> str:
@@ -32,7 +34,7 @@ def get_spn_token() -> str:
     return r.json().get("access_token")
 
 # --- Scanner API Call ---
-def scan_workspace_for_cloud_connections(workspace_id: str, save_to_file: bool = True, print_to_screen: bool = True) -> Dict[str, Any]:
+def scan_workspace_for_cloud_connections(workspace_id: str, save_to_file: bool = True, print_to_screen: bool = True, print_raw_api: bool = False, output_path: str = None) -> Dict[str, Any]:
     """
     Scans a single workspace and returns cloud connection information.
     
@@ -40,6 +42,9 @@ def scan_workspace_for_cloud_connections(workspace_id: str, save_to_file: bool =
         workspace_id: The workspace ID to scan
         save_to_file: Whether to save results to JSON file (default: True)
         print_to_screen: Whether to print formatted output to console (default: True)
+        print_raw_api: Whether to print the raw API JSON response (default: False)
+        output_path: Custom directory path to save the file (default: None for current directory)
+                     Example: "/lakehouse/default/Files/" or "C:/MyFolder/"
     
     Returns:
         Dictionary with workspace metadata and cloud connections
@@ -107,6 +112,14 @@ def scan_workspace_for_cloud_connections(workspace_id: str, save_to_file: bool =
     result_response.raise_for_status()
     scan_data = result_response.json()
     
+    # Print raw API response if requested
+    if print_raw_api:
+        print("\n" + "="*60)
+        print("RAW API JSON RESPONSE:")
+        print("="*60)
+        print(json.dumps(scan_data, indent=2))
+        print("="*60 + "\n")
+    
     # Step 4: Extract cloud connections
     cloud_connectors = {
         "azuresqldatabase", "sqlserverless", "synapse", "kusto",
@@ -123,7 +136,7 @@ def scan_workspace_for_cloud_connections(workspace_id: str, save_to_file: bool =
     }
     
     for workspace in scan_data.get("workspaces", []):
-        if workspace.get("id") == workspace_id:
+        if workspace.get("id", "").lower() == workspace_id.lower():
             results["workspace_name"] = workspace.get("name")
             results["workspace_type"] = workspace.get("type")
             
@@ -210,13 +223,28 @@ def scan_workspace_for_cloud_connections(workspace_id: str, save_to_file: bool =
     
     # Save to JSON file if requested
     if save_to_file:
+        import os
         filename = f"workspace_{workspace_id}_cloud_connections.json"
-        with open(filename, "w") as f:
+        
+        if output_path:
+            # Ensure the directory exists
+            os.makedirs(output_path, exist_ok=True)
+            full_path = os.path.join(output_path, filename)
+        else:
+            full_path = filename
+        
+        with open(full_path, "w") as f:
             json.dump(results, f, indent=2)
-        print(f"\n✅ Results saved to: {filename}")
+        print(f"\n✅ Results saved to: {full_path}")
     
     # Print to console if requested
     if print_to_screen:
+        print("\n" + "="*60)
+        print("FULL API JSON RESULT:")
+        print("="*60)
+        print(json.dumps(scan_data, indent=2))
+        print("="*60 + "\n")
+        
         print(f"\n{'='*60}")
         print(f"Workspace: {results['workspace_name']}")
         print(f"Type: {results['workspace_type']}")
@@ -246,7 +274,9 @@ if __name__ == "__main__":
         results = scan_workspace_for_cloud_connections(
             WORKSPACE_ID, 
             save_to_file=SAVE_JSON_FILE,
-            print_to_screen=PRINT_TO_SCREEN
+            print_to_screen=PRINT_TO_SCREEN,
+            print_raw_api=PRINT_RAW_API_RESPONSE,
+            output_path=OUTPUT_PATH
         )
         
     except Exception as e:
