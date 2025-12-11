@@ -15,6 +15,7 @@ WORKSPACE_ID = "12345678-1234-1234-1234-123456789abc"  # Your workspace ID
 
 # Output options
 SAVE_JSON_FILE = True  # Set to False to skip saving JSON file
+PRINT_TO_SCREEN = True  # Set to False to skip console output
 
 # --- Auth ---
 def get_spn_token() -> str:
@@ -31,13 +32,14 @@ def get_spn_token() -> str:
     return r.json().get("access_token")
 
 # --- Scanner API Call ---
-def scan_workspace_for_cloud_connections(workspace_id: str, save_to_file: bool = True) -> Dict[str, Any]:
+def scan_workspace_for_cloud_connections(workspace_id: str, save_to_file: bool = True, print_to_screen: bool = True) -> Dict[str, Any]:
     """
     Scans a single workspace and returns cloud connection information.
     
     Args:
         workspace_id: The workspace ID to scan
         save_to_file: Whether to save results to JSON file (default: True)
+        print_to_screen: Whether to print formatted output to console (default: True)
     
     Returns:
         Dictionary with workspace metadata and cloud connections
@@ -213,13 +215,8 @@ def scan_workspace_for_cloud_connections(workspace_id: str, save_to_file: bool =
             json.dump(results, f, indent=2)
         print(f"\n✅ Results saved to: {filename}")
     
-    return results
-
-# --- Execute ---
-if __name__ == "__main__":
-    try:
-        results = scan_workspace_for_cloud_connections(WORKSPACE_ID, save_to_file=SAVE_JSON_FILE)
-        
+    # Print to console if requested
+    if print_to_screen:
         print(f"\n{'='*60}")
         print(f"Workspace: {results['workspace_name']}")
         print(f"Type: {results['workspace_type']}")
@@ -240,6 +237,17 @@ if __name__ == "__main__":
                     print(f"   Endpoint: {conn['endpoint']}")
         else:
             print("No cloud connections found in this workspace.")
+    
+    return results
+
+# --- Execute ---
+if __name__ == "__main__":
+    try:
+        results = scan_workspace_for_cloud_connections(
+            WORKSPACE_ID, 
+            save_to_file=SAVE_JSON_FILE,
+            print_to_screen=PRINT_TO_SCREEN
+        )
         
     except Exception as e:
         print(f"❌ Error: {e}")
