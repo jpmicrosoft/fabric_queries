@@ -13,6 +13,9 @@ CLIENT_SECRET = "your-app-client-secret"
 # Target workspace
 WORKSPACE_ID = "12345678-1234-1234-1234-123456789abc"  # Your workspace ID
 
+# Output options
+SAVE_JSON_FILE = True  # Set to False to skip saving JSON file
+
 # --- Auth ---
 def get_spn_token() -> str:
     """Get access token using Service Principal credentials."""
@@ -28,9 +31,13 @@ def get_spn_token() -> str:
     return r.json().get("access_token")
 
 # --- Scanner API Call ---
-def scan_workspace_for_cloud_connections(workspace_id: str) -> Dict[str, Any]:
+def scan_workspace_for_cloud_connections(workspace_id: str, save_to_file: bool = True) -> Dict[str, Any]:
     """
     Scans a single workspace and returns cloud connection information.
+    
+    Args:
+        workspace_id: The workspace ID to scan
+        save_to_file: Whether to save results to JSON file (default: True)
     
     Returns:
         Dictionary with workspace metadata and cloud connections
@@ -199,12 +206,19 @@ def scan_workspace_for_cloud_connections(workspace_id: str) -> Dict[str, Any]:
                                 "has_gateway": not is_cloud_flag
                             })
     
+    # Save to JSON file if requested
+    if save_to_file:
+        filename = f"workspace_{workspace_id}_cloud_connections.json"
+        with open(filename, "w") as f:
+            json.dump(results, f, indent=2)
+        print(f"\n✅ Results saved to: {filename}")
+    
     return results
 
 # --- Execute ---
 if __name__ == "__main__":
     try:
-        results = scan_workspace_for_cloud_connections(WORKSPACE_ID)
+        results = scan_workspace_for_cloud_connections(WORKSPACE_ID, save_to_file=SAVE_JSON_FILE)
         
         print(f"\n{'='*60}")
         print(f"Workspace: {results['workspace_name']}")
@@ -226,11 +240,6 @@ if __name__ == "__main__":
                     print(f"   Endpoint: {conn['endpoint']}")
         else:
             print("No cloud connections found in this workspace.")
-        
-        # Optionally save to JSON
-        with open(f"workspace_{WORKSPACE_ID}_cloud_connections.json", "w") as f:
-            json.dump(results, f, indent=2)
-        print(f"\n✅ Results saved to: workspace_{WORKSPACE_ID}_cloud_connections.json")
         
     except Exception as e:
         print(f"❌ Error: {e}")
