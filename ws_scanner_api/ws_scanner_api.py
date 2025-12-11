@@ -33,6 +33,60 @@ def get_spn_token() -> str:
     r.raise_for_status()
     return r.json().get("access_token")
 
+# --- Tenant Settings Check ---
+def check_metadata_scanning_enabled() -> Dict[str, Any]:
+    """
+    Checks if enhanced metadata scanning is enabled in the tenant.
+    Returns the tenant settings related to metadata scanning.
+    """
+    token = get_spn_token()
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
+    
+    base_url = "https://api.powerbi.com/v1.0/myorg/admin"
+    
+    print("\n🔍 Checking tenant settings for metadata scanning...")
+    try:
+        # Get tenant settings
+        settings_response = requests.get(
+            f"{base_url}/tenantsettings",
+            headers=headers
+        )
+        settings_response.raise_for_status()
+        settings = settings_response.json()
+        
+        # Look for metadata scanning related settings
+        relevant_settings = {}
+        if 'tenantSettings' in settings:
+            for setting in settings['tenantSettings']:
+                setting_name = setting.get('settingName', '')
+                if any(keyword in setting_name.lower() for keyword in ['metadata', 'scan', 'admin', 'api']):
+                    relevant_settings[setting_name] = {
+                        'enabled': setting.get('enabled', False),
+                        'canSpecifySecurityGroups': setting.get('canSpecifySecurityGroups', False),
+                        'enabledSecurityGroups': setting.get('enabledSecurityGroups', [])
+                    }
+        
+        # Display results
+        print("\n📋 Relevant tenant settings:")
+        if relevant_settings:
+            for name, details in relevant_settings.items():
+                status = "✅ ENABLED" if details['enabled'] else "❌ DISABLED"
+                print(f"   {status}: {name}")
+                if details['enabledSecurityGroups']:
+                    print(f"      Applied to specific groups: {len(details['enabledSecurityGroups'])} group(s)")
+        else:
+            print("   ⚠️  Could not find metadata scanning settings")
+        
+        return relevant_settings
+        
+    except Exception as e:
+        print(f"   ❌ Error checking tenant settings: {e}")
+        print("   💡 Tip: Your SPN needs Tenant.Read.All permissions to read tenant settings")
+        return {}
+
 # --- Scanner API Call ---
 def scan_workspace_for_cloud_connections(workspace_id: str, save_to_file: bool = True, print_to_screen: bool = True, print_raw_api: bool = False, output_path: str = None) -> Dict[str, Any]:
     """
@@ -122,6 +176,15 @@ def scan_workspace_for_cloud_connections(workspace_id: str, save_to_file: bool =
     result_response.raise_for_status()
     scan_data = result_response.json()
     
+    # Diagnostic: Show what keys are present in the response
+    print(f"\n📊 Response contains these top-level keys: {list(scan_data.keys())}")
+    if 'datasourceInstances' in scan_data:
+        print(f"   ✅ datasourceInstances found: {len(scan_data['datasourceInstances'])} items")
+    else:
+        print(f"   ⚠️  datasourceInstances key is MISSING from response")
+    if 'workspaces' in scan_data:
+        print(f"   ✅ workspaces found: {len(scan_data['workspaces'])} items")
+    
     # Return full API result without parsing
     results = scan_data
     
@@ -174,6 +237,13 @@ def scan_workspace_for_cloud_connections(workspace_id: str, save_to_file: bool =
 
 # --- Execute ---
 if __name__ == "__main__":
+    # Check tenant settings first
+    print("="*60)
+    print("TENANT SETTINGS CHECK")
+    print("="*60)
+    check_metadata_scanning_enabled()
+    print("="*60 + "\n")
+    
     # Only run if WORKSPACE_ID is set to an actual value (not the placeholder)
     if WORKSPACE_ID == "12345678-1234-1234-1234-123456789abc":
         print("⚠️  WARNING: WORKSPACE_ID is set to the default placeholder value.")
