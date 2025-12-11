@@ -61,8 +61,11 @@ def scan_workspace_for_cloud_connections(workspace_id: str, save_to_file: bool =
     print(f"Initiating scan for workspace: {workspace_id}")
     scan_body = {
         "workspaces": [workspace_id],
+        "datasetSchema": True,
+        "datasetExpressions": True,
         "lineage": True,
-        "users": True
+        "users": True,
+        "datasourceDetails": True
     }
     
     scan_response = requests.post(
