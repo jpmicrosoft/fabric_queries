@@ -1,5 +1,5 @@
 # 1. Open PowerShell and navigate to the folder
-cd C:\Users\jaiperez\Documents\Wells\Fabric_Work\pbi_helper
+cd C:\Users\user1\Documents\Wells\Fabric_Work\pbi_helper
 
 # 2. Load the script
 . .\powerbi_admin_api.ps1
