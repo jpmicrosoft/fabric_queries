@@ -1,14 +1,17 @@
 # Workspace Scanner API
 
-Python script for scanning a specific Microsoft Fabric workspace to identify cloud connections using the Scanner Admin REST API.
+Python script for retrieving complete workspace metadata from Microsoft Fabric using the Scanner Admin REST API.
 
 ## Overview
 
-This tool uses Service Principal authentication to scan a single workspace and extract cloud connection information from:
-- **Semantic Models/Datasets**: Database connections, data sources
-- **Dataflows**: Data source connections
-- **Pipelines**: Linked service connections
-- **Lakehouses/Notebooks**: External connections
+This tool uses Service Principal authentication to scan a single workspace and returns the **complete raw API response** with all workspace details including:
+- **Workspace metadata**: Name, type, state, capacity info
+- **All items**: Semantic Models, Dataflows, Pipelines, Lakehouses, Notebooks, Reports, Dashboards
+- **All connections**: Datasources, gateway info, connection details
+- **Users and permissions**: Workspace access information
+- **Lineage data**: Data flow and dependencies
+
+The script returns the **unfiltered Scanner API JSON response** without any parsing or data transformation.
 
 ## Prerequisites
 
@@ -35,7 +38,6 @@ WORKSPACE_ID = "12345678-1234-1234-1234-123456789abc"
 # Output options
 SAVE_JSON_FILE = True  # Set to False to skip saving JSON file
 PRINT_TO_SCREEN = True  # Set to False to skip console output
-PRINT_RAW_API_RESPONSE = False  # Set to True to see the original API JSON output
 OUTPUT_PATH = None  # Set to a custom path (e.g., "/lakehouse/default/Files/") or leave as None
 ```
 
@@ -49,19 +51,15 @@ python ws_scanner_api.py
 
 ### Output
 
-The script provides flexible output options:
+The script returns the **complete Scanner API JSON response** without any filtering or parsing.
 
 **File Output (`SAVE_JSON_FILE`):**
-- `True` (default): Saves `workspace_{WORKSPACE_ID}_cloud_connections.json`
+- `True` (default): Saves full API response to `workspace_{WORKSPACE_ID}_cloud_connections.json`
 - `False`: No file created
 
 **Console Output (`PRINT_TO_SCREEN`):**
-- `True` (default): Displays full API JSON response + formatted summary
-- `False`: Silent mode, no console output
-
-**Raw API Output (`PRINT_RAW_API_RESPONSE`):**
-- `True`: Shows the complete Scanner API JSON response
-- `False` (default): Only shows formatted summary
+- `True` (default): Displays the complete Scanner API JSON response
+- `False`: Silent mode, returns data only
 
 **Custom Save Location (`OUTPUT_PATH`):**
 - `None` (default): Saves to current working directory
@@ -101,14 +99,29 @@ results = scan_workspace_for_cloud_connections(
 
 ### Example Output
 
-```
-============================================================
-Workspace: Sales Analytics
-Type: Workspace
-Total Cloud Connections: 3
-============================================================
-
-Cloud Connections Found:
+```json
+{
+  "workspaces": [
+    {
+      "id": "12345678-1234-1234-1234-123456789abc",
+      "name": "Sales Analytics",
+      "type": "Workspace",
+      "state": "Active",
+      "isReadOnly": false,
+      "isOnDedicatedCapacity": true,
+      "capacityId": "...",
+      "users": [...],
+      "items": [
+        {
+          "id": "...",
+          "name": "Sales Report",
+          "type": "Report",
+          "datasources": [...]
+        }
+      ]
+    }
+  ]
+}
 
 1. SalesDataset (SemanticModel)
    Connector: azuresqldatabase
@@ -126,33 +139,6 @@ Cloud Connections Found:
    Scope: Cloud
    Endpoint: https://storage.dfs.core.windows.net
 ```
-
-## Cloud Connector Types Detected
-
-The script identifies the following cloud connector types:
-
-| Category | Connectors |
-|----------|-----------|
-| **Azure SQL** | `azuresqldatabase`, `sqlserverless`, `synapse` |
-| **Azure Data** | `adls`, `abfss`, `onelake` |
-| **Analytics** | `kusto`, `fabriclakehouse` |
-| **Cloud Platforms** | `s3`, `snowflake` |
-| **SaaS** | `salesforce`, `dynamics365`, `sharepointonline` |
-| **Generic** | `rest` |
-
-## Cloud Detection Logic
-
-A connection is classified as "cloud" if:
-
-1. **No Gateway Required** (`gatewayId` is `null`) **OR**
-2. **Connector Type** is in the `CLOUD_CONNECTORS` set
-
-### Examples:
-
-- ✅ **Azure SQL Database** (no gateway, cloud connector) → Cloud
-- ✅ **Salesforce** (no gateway, cloud connector) → Cloud
-- ✅ **Snowflake via Gateway** (has gateway, but cloud connector) → Cloud
-- ❌ **On-Prem SQL Server** (has gateway, not cloud connector) → Not Cloud
 
 ## Scanner Admin REST API Workflow
 
@@ -227,22 +213,23 @@ Error: Scan timed out after 10 minutes
 
 ## Use Cases
 
-- Audit a specific workspace for cloud connections
-- Quick connection check for development/test workspaces (set `SAVE_JSON_FILE = False` for console-only output)
-- Verify external data dependencies for a single workspace
-- Generate connection inventory for a project workspace
-- Troubleshoot connection issues in a specific workspace
+- Export complete workspace metadata for analysis
+- Retrieve all workspace items and their configurations
+- Audit workspace connections and data sources
+- Extract lineage and dependency information
+- Backup workspace metadata as JSON
+- Feed workspace data into custom analytics or reporting tools
 
 ## Advanced Usage
 
 ### Programmatic Usage
 
-You can import and use the function with full control over output options:
+You can import and use the function to retrieve workspace data programmatically:
 
 ```python
 from ws_scanner_api import scan_workspace_for_cloud_connections
 
-# Full output: file + console + formatted summary
+# Get full API response with file + console output
 results = scan_workspace_for_cloud_connections(
     "workspace-id",
     save_to_file=True,
@@ -263,12 +250,6 @@ results = scan_workspace_for_cloud_connections(
     print_to_screen=False
 )
 
-# Show raw API JSON response
-results = scan_workspace_for_cloud_connections(
-    "workspace-id",
-    print_raw_api=True
-)
-
 # Save to Fabric Lakehouse
 results = scan_workspace_for_cloud_connections(
     "workspace-id",
@@ -283,10 +264,19 @@ results = scan_workspace_for_cloud_connections(
     output_path="C:/Reports/FabricScans/"
 )
 
-# Access results
-print(f"Found {len(results['cloud_connections'])} cloud connections")
-for conn in results['cloud_connections']:
-    print(f"{conn['item_name']}: {conn['connector']}")
+# Access workspace data from API response
+for workspace in results.get('workspaces', []):
+    print(f"Workspace: {workspace['name']}")
+    print(f"Total items: {len(workspace.get('items', []))}")
+    
+    # Access all items
+    for item in workspace.get('items', []):
+        print(f"  - {item['name']} ({item['type']})")
+        
+        # Access datasources if present
+        for datasource in item.get('datasources', []):
+            conn_details = datasource.get('connectionDetails', {})
+            print(f"    Datasource: {conn_details.get('datasourceType')}")
 ```
 
 ### Function Signature
@@ -296,40 +286,73 @@ def scan_workspace_for_cloud_connections(
     workspace_id: str,
     save_to_file: bool = True,
     print_to_screen: bool = True,
-    print_raw_api: bool = False,
     output_path: str = None
 ) -> Dict[str, Any]
 ```
 
 **Parameters:**
 - `workspace_id`: Target workspace GUID
-- `save_to_file`: Save results to JSON file (default: True)
-- `print_to_screen`: Display full API JSON + formatted output to console (default: True)
-- `print_raw_api`: Display raw Scanner API response (default: False)
+- `save_to_file`: Save complete API response to JSON file (default: True)
+- `print_to_screen`: Display full Scanner API JSON response to console (default: True)
 - `output_path`: Custom save directory path; None = current directory (default: None)
+
+**Returns:**
+- Complete Scanner API response as dictionary
 
 ## JSON Output Schema
 
+The script returns the complete Scanner Admin API response structure:
+
 ```json
 {
-  "workspace_id": "guid",
-  "workspace_name": "string",
-  "workspace_type": "Workspace|PersonalWorkspace",
-  "cloud_connections": [
+  "workspaces": [
     {
-      "item_name": "string",
-      "item_type": "SemanticModel|Dataflow|Pipeline|Lakehouse|Notebook",
-      "item_id": "guid",
-      "connector": "string",
-      "server": "string (optional)",
-      "database": "string (optional)",
-      "endpoint": "string (optional)",
-      "connection_scope": "Cloud|OnPremViaGateway",
-      "has_gateway": boolean
+      "id": "guid",
+      "name": "string",
+      "type": "Workspace|PersonalWorkspace",
+      "state": "Active|Deleted|Removing",
+      "isReadOnly": boolean,
+      "isOrphaned": boolean,
+      "isOnDedicatedCapacity": boolean,
+      "capacityId": "guid (optional)",
+      "defaultDatasetStorageFormat": "string (optional)",
+      "users": [
+        {
+          "identifier": "string",
+          "displayName": "string",
+          "emailAddress": "string",
+          "workspaceUserAccessRight": "Admin|Member|Contributor|Viewer",
+          "principalType": "User|Group|App"
+        }
+      ],
+      "items": [
+        {
+          "id": "guid",
+          "name": "string",
+          "type": "Report|Dashboard|SemanticModel|Dataflow|Pipeline|Lakehouse|Notebook|...",
+          "datasources": [
+            {
+              "datasourceId": "guid",
+              "gatewayId": "guid (optional)",
+              "connectionDetails": {
+                "datasourceType": "string",
+                "server": "string (optional)",
+                "database": "string (optional)",
+                "url": "string (optional)"
+              }
+            }
+          ],
+          "users": [...],
+          "subscriptions": [...],
+          "endorsementDetails": {...}
+        }
+      ]
     }
   ]
 }
 ```
+
+For complete schema documentation, see the [Scanner Admin REST API reference](https://learn.microsoft.com/rest/api/power-bi/admin/workspace-info-get-scan-result)
 
 ## Security Considerations
 

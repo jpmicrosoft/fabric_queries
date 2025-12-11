@@ -112,114 +112,8 @@ def scan_workspace_for_cloud_connections(workspace_id: str, save_to_file: bool =
     result_response.raise_for_status()
     scan_data = result_response.json()
     
-    # Print raw API response if requested
-    if print_raw_api:
-        print("\n" + "="*60)
-        print("RAW API JSON RESPONSE:")
-        print("="*60)
-        print(json.dumps(scan_data, indent=2))
-        print("="*60 + "\n")
-    
-    # Step 4: Extract cloud connections
-    cloud_connectors = {
-        "azuresqldatabase", "sqlserverless", "synapse", "kusto",
-        "onelake", "adls", "abfss", "s3", "rest",
-        "sharepointonline", "dynamics365", "salesforce", "snowflake",
-        "fabriclakehouse"
-    }
-    
-    results = {
-        "workspace_id": workspace_id,
-        "workspace_name": None,
-        "workspace_type": None,
-        "cloud_connections": []
-    }
-    
-    for workspace in scan_data.get("workspaces", []):
-        if workspace.get("id", "").lower() == workspace_id.lower():
-            results["workspace_name"] = workspace.get("name")
-            results["workspace_type"] = workspace.get("type")
-            
-            # Process all items in workspace
-            for item in workspace.get("items", []):
-                item_type = item.get("type", "").lower()
-                item_name = item.get("name")
-                item_id = item.get("id")
-                
-                # Semantic Models / Datasets
-                if item_type in {"semanticmodel", "dataset"}:
-                    for datasource in item.get("datasources", []):
-                        conn_details = datasource.get("connectionDetails", {})
-                        connector = conn_details.get("datasourceType", "").lower()
-                        gateway_id = datasource.get("gatewayId")
-                        
-                        # Check if it's a cloud connection
-                        is_cloud = (gateway_id is None) or (connector in cloud_connectors)
-                        
-                        if is_cloud:
-                            results["cloud_connections"].append({
-                                "item_name": item_name,
-                                "item_type": "SemanticModel",
-                                "item_id": item_id,
-                                "connector": connector,
-                                "server": conn_details.get("server"),
-                                "database": conn_details.get("database"),
-                                "connection_scope": "Cloud" if gateway_id is None else "OnPremViaGateway",
-                                "has_gateway": gateway_id is not None
-                            })
-                
-                # Dataflows
-                elif item_type == "dataflow":
-                    for source in item.get("sources", []):
-                        connector = source.get("type", "").lower()
-                        
-                        if connector in cloud_connectors or connector != "unknown":
-                            results["cloud_connections"].append({
-                                "item_name": item_name,
-                                "item_type": "Dataflow",
-                                "item_id": item_id,
-                                "connector": connector,
-                                "endpoint": source.get("url"),
-                                "connection_scope": "Cloud",
-                                "has_gateway": False
-                            })
-                
-                # Pipelines
-                elif item_type == "pipeline":
-                    for activity in item.get("activities", []):
-                        linked_service = activity.get("linkedService", {})
-                        connector = linked_service.get("type", "").lower()
-                        gateway_id = linked_service.get("gatewayId")
-                        
-                        is_cloud = (gateway_id is None) or (connector in cloud_connectors)
-                        
-                        if is_cloud:
-                            results["cloud_connections"].append({
-                                "item_name": item_name,
-                                "item_type": "Pipeline",
-                                "item_id": item_id,
-                                "connector": connector,
-                                "endpoint": linked_service.get("url"),
-                                "connection_scope": "Cloud" if gateway_id is None else "OnPremViaGateway",
-                                "has_gateway": gateway_id is not None
-                            })
-                
-                # Lakehouses / Notebooks
-                elif item_type in {"lakehouse", "notebook"}:
-                    for connection in item.get("connections", []):
-                        connector = connection.get("type", "").lower()
-                        is_cloud_flag = connection.get("isCloud", True)
-                        
-                        if is_cloud_flag or connector in cloud_connectors:
-                            results["cloud_connections"].append({
-                                "item_name": item_name,
-                                "item_type": item_type.capitalize(),
-                                "item_id": item_id,
-                                "connector": connector,
-                                "endpoint": connection.get("url"),
-                                "connection_scope": "Cloud" if is_cloud_flag else "OnPremViaGateway",
-                                "has_gateway": not is_cloud_flag
-                            })
+    # Return full API result without parsing
+    results = scan_data
     
     # Save to JSON file if requested
     if save_to_file:
@@ -244,27 +138,6 @@ def scan_workspace_for_cloud_connections(workspace_id: str, save_to_file: bool =
         print("="*60)
         print(json.dumps(scan_data, indent=2))
         print("="*60 + "\n")
-        
-        print(f"\n{'='*60}")
-        print(f"Workspace: {results['workspace_name']}")
-        print(f"Type: {results['workspace_type']}")
-        print(f"Total Cloud Connections: {len(results['cloud_connections'])}")
-        print(f"{'='*60}\n")
-        
-        if results['cloud_connections']:
-            print("Cloud Connections Found:")
-            for idx, conn in enumerate(results['cloud_connections'], 1):
-                print(f"\n{idx}. {conn['item_name']} ({conn['item_type']})")
-                print(f"   Connector: {conn['connector']}")
-                print(f"   Scope: {conn['connection_scope']}")
-                if conn.get('server'):
-                    print(f"   Server: {conn['server']}")
-                if conn.get('database'):
-                    print(f"   Database: {conn['database']}")
-                if conn.get('endpoint'):
-                    print(f"   Endpoint: {conn['endpoint']}")
-        else:
-            print("No cloud connections found in this workspace.")
     
     return results
 
