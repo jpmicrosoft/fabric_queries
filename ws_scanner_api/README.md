@@ -21,6 +21,7 @@ The script returns the **unfiltered Scanner API JSON response** without any pars
 - **Service Principal** with appropriate permissions:
   - `Tenant.Read.All` or `Tenant.ReadWrite.All` scope
   - Member of Fabric Admin security group
+- **For Fabric Lakehouse saving**: `notebookutils` (available in Fabric notebooks)
 
 ## Configuration
 
@@ -80,7 +81,7 @@ python ws_scanner_api.py
 ```
 
 **Fabric Lakehouse:**
-When running in a Fabric notebook, save to your attached Lakehouse:
+When running in a Fabric notebook, save to your attached Lakehouse using `mssparkutils`:
 
 ```python
 # Set in configuration section
@@ -89,13 +90,17 @@ OUTPUT_PATH = "/lakehouse/default/Files/"
 # Or pass as parameter
 results = scan_workspace_for_cloud_connections(
     "workspace-id",
+    save_to_file=True,
     output_path="/lakehouse/default/Files/"
 )
 
 # File will appear in: Lakehouse > Files > workspace_{id}_cloud_connections.json
 ```
 
-**Note:** The `/lakehouse/default/` path automatically points to your notebook's attached lakehouse, regardless of the lakehouse name.
+**Note:** 
+- The script automatically detects Fabric Lakehouse paths (starting with `/lakehouse/` or `abfss://`) and uses `mssparkutils.fs.put()` to save files
+- The `/lakehouse/default/` path automatically points to your notebook's attached lakehouse, regardless of the lakehouse name
+- If `mssparkutils` is not available, the script falls back to saving in a temp directory with instructions to manually copy
 
 ### Example Output
 

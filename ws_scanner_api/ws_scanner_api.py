@@ -117,19 +117,40 @@ def scan_workspace_for_cloud_connections(workspace_id: str, save_to_file: bool =
     
     # Save to JSON file if requested
     if save_to_file:
-        import os
         filename = f"workspace_{workspace_id}_cloud_connections.json"
         
         if output_path:
-            # Ensure the directory exists
-            os.makedirs(output_path, exist_ok=True)
-            full_path = os.path.join(output_path, filename)
+            # Check if running in Fabric/Spark environment with lakehouse path
+            if output_path.startswith("/lakehouse/") or output_path.startswith("abfss://"):
+                try:
+                    # Use mssparkutils for Fabric Lakehouse paths
+                    from notebookutils import mssparkutils
+                    full_path = output_path.rstrip('/') + '/' + filename
+                    mssparkutils.fs.put(full_path, json.dumps(results, indent=2), True)
+                    print(f"\n✅ Results saved to: {full_path}")
+                except ImportError:
+                    # Fallback if mssparkutils not available
+                    print("⚠️  Warning: mssparkutils not available. Saving to local temp directory instead.")
+                    import tempfile
+                    full_path = f"{tempfile.gettempdir()}/{filename}"
+                    with open(full_path, "w") as f:
+                        json.dump(results, f, indent=2)
+                    print(f"\n✅ Results saved to: {full_path}")
+                    print(f"💡 Tip: Manually copy to lakehouse using: mssparkutils.fs.cp('{full_path}', '{output_path}{filename}')")
+            else:
+                # Local file system path
+                import os
+                os.makedirs(output_path, exist_ok=True)
+                full_path = os.path.join(output_path, filename)
+                with open(full_path, "w") as f:
+                    json.dump(results, f, indent=2)
+                print(f"\n✅ Results saved to: {full_path}")
         else:
+            # No output path specified, save to current directory
             full_path = filename
-        
-        with open(full_path, "w") as f:
-            json.dump(results, f, indent=2)
-        print(f"\n✅ Results saved to: {full_path}")
+            with open(full_path, "w") as f:
+                json.dump(results, f, indent=2)
+            print(f"\n✅ Results saved to: {full_path}")
     
     # Print to console if requested
     if print_to_screen:
@@ -143,16 +164,22 @@ def scan_workspace_for_cloud_connections(workspace_id: str, save_to_file: bool =
 
 # --- Execute ---
 if __name__ == "__main__":
-    try:
-        results = scan_workspace_for_cloud_connections(
-            WORKSPACE_ID, 
-            save_to_file=SAVE_JSON_FILE,
-            print_to_screen=PRINT_TO_SCREEN,
-            print_raw_api=PRINT_RAW_API_RESPONSE,
-            output_path=OUTPUT_PATH
-        )
-        
-    except Exception as e:
-        print(f"❌ Error: {e}")
-        import traceback
-        traceback.print_exc()
+    # Only run if WORKSPACE_ID is set to an actual value (not the placeholder)
+    if WORKSPACE_ID == "12345678-1234-1234-1234-123456789abc":
+        print("⚠️  WARNING: WORKSPACE_ID is set to the default placeholder value.")
+        print("Please update the WORKSPACE_ID variable or call the function directly:")
+        print('results = scan_workspace_for_cloud_connections("your-workspace-id", save_to_file=True)')
+    else:
+        try:
+            results = scan_workspace_for_cloud_connections(
+                WORKSPACE_ID, 
+                save_to_file=SAVE_JSON_FILE,
+                print_to_screen=PRINT_TO_SCREEN,
+                print_raw_api=PRINT_RAW_API_RESPONSE,
+                output_path=OUTPUT_PATH
+            )
+            
+        except Exception as e:
+            print(f"❌ Error: {e}")
+            import traceback
+            traceback.print_exc()
