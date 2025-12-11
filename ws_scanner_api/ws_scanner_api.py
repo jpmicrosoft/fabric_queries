@@ -59,18 +59,25 @@ def scan_workspace_for_cloud_connections(workspace_id: str, save_to_file: bool =
     
     # Step 1: Initiate scan for the workspace
     print(f"Initiating scan for workspace: {workspace_id}")
+    
+    # Request body contains only workspace IDs
     scan_body = {
-        "workspaces": [workspace_id],
-        "datasetSchema": True,
-        "datasetExpressions": True,
-        "lineage": True,
-        "users": True,
-        "datasourceDetails": True
+        "workspaces": [workspace_id]
+    }
+    
+    # Parameters go in the query string
+    params = {
+        "lineage": "True",
+        "datasourceDetails": "True",
+        "datasetSchema": "True",
+        "datasetExpressions": "True",
+        "getArtifactUsers": "True"
     }
     
     scan_response = requests.post(
         f"{base_url}/workspaces/getInfo",
         headers=headers,
+        params=params,
         json=scan_body
     )
     scan_response.raise_for_status()
